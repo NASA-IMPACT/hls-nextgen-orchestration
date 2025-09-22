@@ -1,0 +1,86 @@
+{
+  "jobArn": "arn:aws:batch:us-west-2:611670965994:job/b69e7914-a396-4c79-9bdd-55b0fa8180eb",
+  "jobName": "LandsatAcJob",
+  "jobId": "b69e7914-a396-4c79-9bdd-55b0fa8180eb",
+  "jobQueue": "arn:aws:batch:us-west-2:611670965994:job-queue/BatchLandsatAcJobQueueD5-1pyRW2PHw37DhwTf",
+  "status": "FAILED",
+  "attempts": [
+    {
+      "container": {
+        "containerInstanceArn": "arn:aws:ecs:us-west-2:611670965994:container-instance/BatchComputeEnvironment9-0OFw7AHT7ojesu8J_Batch_88ef208a-34f7-32e1-8d86-4e7c4cc53ea6/9f17f53b43174bc7b696e8e66b3df3e6",
+        "taskArn": "arn:aws:ecs:us-west-2:611670965994:task/BatchComputeEnvironment9-0OFw7AHT7ojesu8J_Batch_88ef208a-34f7-32e1-8d86-4e7c4cc53ea6/c91ac76cc90547158ae62de97c500485",
+        "logStreamName": "LandsatTaskBatchJob1274-22c9d72bcea6994/default/c91ac76cc90547158ae62de97c500485",
+        "networkInterfaces": []
+      },
+      "startedAt": 1745369059232,
+      "stoppedAt": 1745369330058,
+      "statusReason": "Host EC2 (instance i-01225b700440f4809) terminated."
+    },
+    {
+      "container": {
+        "containerInstanceArn": "arn:aws:ecs:us-west-2:611670965994:container-instance/BatchComputeEnvironment9-0OFw7AHT7ojesu8J_Batch_88ef208a-34f7-32e1-8d86-4e7c4cc53ea6/9f17f53b43174bc7b696e8e66b3df3e6",
+        "taskArn": "arn:aws:ecs:us-west-2:611670965994:task/BatchComputeEnvironment9-0OFw7AHT7ojesu8J_Batch_88ef208a-34f7-32e1-8d86-4e7c4cc53ea6/c91ac76cc90547158ae62de97c500485",
+        "logStreamName": "LandsatTaskBatchJob1274-22c9d72bcea6994/default/c91ac76cc90547158ae62de97c500485",
+        "networkInterfaces": []
+      },
+      "startedAt": 1745369330058,
+      "stoppedAt": 1745369330158,
+      "statusReason": "Host EC2 (instance i-01225b700440f4809) terminated."
+    },
+    {
+      "container": {
+        "containerInstanceArn": "arn:aws:ecs:us-west-2:611670965994:container-instance/BatchComputeEnvironment9-0OFw7AHT7ojesu8J_Batch_88ef208a-34f7-32e1-8d86-4e7c4cc53ea6/9f17f53b43174bc7b696e8e66b3df3e6",
+        "taskArn": "arn:aws:ecs:us-west-2:611670965994:task/BatchComputeEnvironment9-0OFw7AHT7ojesu8J_Batch_88ef208a-34f7-32e1-8d86-4e7c4cc53ea6/c91ac76cc90547158ae62de97c500485",
+        "logStreamName": "LandsatTaskBatchJob1274-22c9d72bcea6994/default/c91ac76cc90547158ae62de97c500485",
+        "networkInterfaces": []
+      },
+      "startedAt": 1745369330158,
+      "stoppedAt": 1745369331158,
+      "statusReason": "Host EC2 (instance i-01225b700440f4809) terminated."
+    }
+  ],
+  "statusReason": "Host EC2 (instance i-01225b700440f4809) terminated.",
+  "createdAt": 1745369019648,
+  "retryStrategy": {
+    "attempts": 3,
+    "evaluateOnExit": [
+      { "onReason": "CannotPullContainerError:*", "action": "retry" },
+      { "onStatusReason": "Host EC2*", "action": "retry" },
+      { "onReason": "*", "action": "exit" }
+    ]
+  },
+  "startedAt": 1745369059232,
+  "stoppedAt": 1745369331158,
+  "dependsOn": [],
+  "jobDefinition": "arn:aws:batch:us-west-2:611670965994:job-definition/LandsatTaskBatchJob1274-22c9d72bcea6994:3",
+  "parameters": {},
+  "container": {
+    "image": "018923174646.dkr.ecr.us-west-2.amazonaws.com/hls-landsat-c2:v3.5.1.2",
+    "vcpus": 2,
+    "memory": 20000,
+    "command": [
+      "export && landsat.sh"
+    ],
+    "jobRoleArn": "arn:aws:iam::611670965994:role/hls-mcp-production-viirs-LandsatTaskTaskRoleFD2391A-OGNYvUOzGjQF",
+    "volumes": [],
+    "environment": [
+      { "name": "GRANULE_ID", "value": "HLS.S30.T01GBH.2022226T214921.v2.0" },
+      { "name": "ATTEMPT", "value": "0" }
+    ],
+    "mountPoints": [],
+    "ulimits": [],
+    "containerInstanceArn": "arn:aws:ecs:us-west-2:611670965994:container-instance/BatchComputeEnvironment9-0OFw7AHT7ojesu8J_Batch_88ef208a-34f7-32e1-8d86-4e7c4cc53ea6/9f17f53b43174bc7b696e8e66b3df3e6",
+    "taskArn": "arn:aws:ecs:us-west-2:611670965994:task/BatchComputeEnvironment9-0OFw7AHT7ojesu8J_Batch_88ef208a-34f7-32e1-8d86-4e7c4cc53ea6/c91ac76cc90547158ae62de97c500485",
+    "logStreamName": "LandsatTaskBatchJob1274-22c9d72bcea6994/default/c91ac76cc90547158ae62de97c500485",
+    "networkInterfaces": [],
+    "resourceRequirements": [],
+    "secrets": []
+  },
+  "timeout": {
+    "attemptDurationSeconds": 5400
+  },
+  "tags": {},
+  "propagateTags": false,
+  "platformCapabilities": [],
+  "eksAttempts": []
+}

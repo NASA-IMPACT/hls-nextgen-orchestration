@@ -1,0 +1,10 @@
+[project]
+name = "common"
+version = "0.1.0"
+description = "Common modules for lambdas"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3-stubs[batch,s3,sqs]>=1.37.36",
+    "boto_session_manager",
+    "s3pathlib",
+]

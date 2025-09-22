@@ -1,0 +1,86 @@
+{
+  "version": "0",
+  "id": "7eccf1e1-b9b8-e9f3-2852-72e66eab00c6",
+  "detail-type": "Batch Job State Change",
+  "source": "aws.batch",
+  "account": "611670965994",
+  "time": "2025-04-23T19:01:54Z",
+  "region": "us-west-2",
+  "resources": [
+    "arn:aws:batch:us-west-2:611670965994:job/e13b29a0-3b61-403e-b750-e1d954fc6b13"
+  ],
+  "detail": {
+    "jobArn": "arn:aws:batch:us-west-2:611670965994:job/e13b29a0-3b61-403e-b750-e1d954fc6b13",
+    "jobName": "test-failure",
+    "jobId": "e13b29a0-3b61-403e-b750-e1d954fc6b13",
+    "jobQueue": "arn:aws:batch:us-west-2:611670965994:job-queue/HLSVIInfraJobQueue6447D2-cWsRRSc5gTBfC4g1",
+    "status": "FAILED",
+    "attempts": [
+      {
+        "container": {
+          "containerInstanceArn": "arn:aws:ecs:us-west-2:611670965994:container-instance/AWSBatch-HLSVIInfraComputeEnviron-ZDfhB0oiDwfei7pC-5ff91a9a-93e7-3576-92c6-f1e362df5619/c24d5dccbd8e4216a033473110be76af",
+          "taskArn": "arn:aws:ecs:us-west-2:611670965994:task/AWSBatch-HLSVIInfraComputeEnviron-ZDfhB0oiDwfei7pC-5ff91a9a-93e7-3576-92c6-f1e362df5619/63eb5c704ef244d3aaa78d23d1717e10",
+          "exitCode": 1,
+          "logStreamName": "job/default/63eb5c704ef244d3aaa78d23d1717e10",
+          "networkInterfaces": []
+        },
+        "startedAt": 1745434913482,
+        "stoppedAt": 1745434913574,
+        "statusReason": "Essential container in task exited"
+      }
+    ],
+    "statusReason": "Essential container in task exited",
+    "createdAt": 1745434620145,
+    "retryStrategy": {
+      "attempts": 3,
+      "evaluateOnExit": [
+        { "onReason": "CannotPullContainerError:*", "action": "retry" },
+        { "onStatusReason": "Host EC2*", "action": "retry" },
+        { "onReason": "*", "action": "exit" }
+      ]
+    },
+    "startedAt": 1745434913482,
+    "stoppedAt": 1745434913574,
+    "dependsOn": [],
+    "jobDefinition": "arn:aws:batch:us-west-2:611670965994:job-definition/HLSVIProcessingJobDef35A-5zZ2aDtcQB9iZ4gW:3",
+    "parameters": {},
+    "container": {
+      "image": "public.ecr.aws/amazonlinux/amazonlinux:latest",
+      "command": ["/bin/bash", "-c", "exit 1"],
+      "executionRoleArn": "arn:aws:iam::611670965994:role/hls-vi-historical-orchest-HLSVIProcessingBatchConta-dNvNJCUjKaJ9",
+      "volumes": [],
+      "environment": [
+          {"name": "GRANULE_ID", "value": "HLS.S30.T01GBH.2022226T214921.v2.0"},
+          {"name": "ATTEMPT", "value": "0"}
+      ],
+      "mountPoints": [],
+      "readonlyRootFilesystem": false,
+      "ulimits": [],
+      "exitCode": 1,
+      "containerInstanceArn": "arn:aws:ecs:us-west-2:611670965994:container-instance/AWSBatch-HLSVIInfraComputeEnviron-ZDfhB0oiDwfei7pC-5ff91a9a-93e7-3576-92c6-f1e362df5619/c24d5dccbd8e4216a033473110be76af",
+      "taskArn": "arn:aws:ecs:us-west-2:611670965994:task/AWSBatch-HLSVIInfraComputeEnviron-ZDfhB0oiDwfei7pC-5ff91a9a-93e7-3576-92c6-f1e362df5619/63eb5c704ef244d3aaa78d23d1717e10",
+      "logStreamName": "job/default/63eb5c704ef244d3aaa78d23d1717e10",
+      "networkInterfaces": [],
+      "resourceRequirements": [
+        { "value": "1000", "type": "MEMORY" },
+        { "value": "1", "type": "VCPU" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "hls-vi-historical-orchestration-processing-dev",
+          "awslogs-region": "us-west-2",
+          "awslogs-stream-prefix": "job"
+        },
+        "secretOptions": []
+      },
+      "secrets": []
+    },
+    "tags": {
+      "resourceArn": "arn:aws:batch:us-west-2:611670965994:job/e13b29a0-3b61-403e-b750-e1d954fc6b13"
+    },
+    "propagateTags": false,
+    "platformCapabilities": ["EC2"],
+    "eksAttempts": []
+  }
+}

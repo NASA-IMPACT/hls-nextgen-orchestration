@@ -6,7 +6,7 @@ import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 from boto_session_manager import BotoSesManager
 from botocore.exceptions import ClientError
@@ -33,13 +33,13 @@ class NoSuchEventAttemptExists(FileNotFoundError):
 
 
 @dataclass
-class GranuleEventJobLog:
-    """HLS-VI processing job attempt details"""
+class GranuleEventLog:
+    """HLS processing job attempt details"""
 
     granule_id: str
     attempt: int
-    outcome: JobOutcome
-    job_info: JobDetailTypeDef
+    outcome: JobOutcome | ProcessingOutcome
+    job_info: Optional[JobDetailTypeDef] = None
 
     def to_json(self) -> str:
         """Export to JSON (enum dumped by name)"""
@@ -53,14 +53,20 @@ class GranuleEventJobLog:
         )
 
     @classmethod
-    def from_json(cls, json_str: str) -> GranuleEventJobLog:
+    def from_json(cls, json_str: str) -> GranuleEventLog:
         """Load from JSON"""
         data = json.loads(json_str)
+        job_info = data.get("job_info")
+        outcome: JobOutcome | ProcessingOutcome | None = None
+        if job_info:
+            outcome = JobOutcome[data["outcome"]]
+        else:
+            outcome = ProcessingOutcome[data["outcome"]]
         return cls(
             granule_id=data["granule_id"],
             attempt=data["attempt"],
-            outcome=JobOutcome[data["outcome"]],
-            job_info=data["job_info"],
+            outcome=outcome,
+            job_info=job_info,
         )
 
 
@@ -101,6 +107,8 @@ class GranuleLoggerService:
     outcome_to_prefix: ClassVar[dict[ProcessingOutcome, str]] = {
         ProcessingOutcome.SUCCESS: "success",
         ProcessingOutcome.FAILURE: "failure",
+        ProcessingOutcome.AWAITING: "awaiting",
+        ProcessingOutcome.SUBMITTED: "submitted",
     }
     prefix_to_outcome: ClassVar[dict[str, ProcessingOutcome]] = {
         value: key for key, value in outcome_to_prefix.items()
@@ -183,34 +191,51 @@ class GranuleLoggerService:
             paths.append(path)
         return paths
 
-    def _clean_failures(self, granule_id: str) -> None:
-        """Cleanup failures"""
-        for failure_path in self._list_logs_for_outcome(
-            granule_id, ProcessingOutcome.FAILURE
-        ):
-            event, outcome = self._path_to_event_outcome(failure_path)
-            success_path = self._path_for_event_outcome(
-                event, ProcessingOutcome.SUCCESS
-            )
-            failure_path.copy_to(success_path, bsm=self.bsm, overwrite=True)
-            failure_path.delete(bsm=self.bsm)
+    def _clean_previous_states(
+        self, granule_id: str, outcome: ProcessingOutcome
+    ) -> None:
+        """Cleanup previous states"""
+        for outcome_path in self._list_logs_for_outcome(granule_id, outcome):
+            event, outcome = self._path_to_event_outcome(outcome_path)
+            if outcome == ProcessingOutcome.FAILURE:
+                success_path = self._path_for_event_outcome(
+                    event, ProcessingOutcome.SUCCESS
+                )
+                outcome_path.copy_to(success_path, bsm=self.bsm, overwrite=True)
+            outcome_path.delete(bsm=self.bsm)
+
+    def put_event(
+        self, event: GranuleProcessingEvent, outcome: ProcessingOutcome
+    ) -> None:
+        s3path = self._path_for_event_outcome(event=event, outcome=outcome)
+        event_log = GranuleEventLog(
+            granule_id=event.granule_id,
+            attempt=event.attempt,
+            outcome=outcome,
+        )
+
+        s3path.write_text(event_log.to_json(), bsm=self.bsm)
+        if outcome == ProcessingOutcome.SUBMITTED:
+            self._clean_previous_states(event.granule_id, ProcessingOutcome.AWAITING)
 
     def put_event_details(self, details: JobDetails) -> None:
         """Log event details"""
         event = details.get_granule_event()
         job_outcome = details.get_job_outcome()
         s3path = self._path_for_event_outcome(event, job_outcome.processing_outcome)
-        event_log = GranuleEventJobLog(
+        event_log = GranuleEventLog(
             granule_id=event.granule_id,
             attempt=event.attempt,
             outcome=job_outcome,
             job_info=details.get_job_info(),
         )
         s3path.write_text(event_log.to_json(), bsm=self.bsm)
+        if job_outcome.processing_outcome == ProcessingOutcome.FAILURE:
+            self._clean_previous_states(event.granule_id, ProcessingOutcome.SUBMITTED)
         if job_outcome.processing_outcome == ProcessingOutcome.SUCCESS:
-            self._clean_failures(event.granule_id)
+            self._clean_previous_states(event.granule_id, ProcessingOutcome.FAILURE)
 
-    def get_event_details(self, event: GranuleProcessingEvent) -> JobDetails:
+    def get_event_details(self, event: GranuleProcessingEvent) -> JobDetails | None:
         """Get event details for an event
 
         Raises
@@ -226,8 +251,11 @@ class GranuleLoggerService:
                 if e.response["Error"]["Code"] != "NoSuchKey":
                     raise
             else:
-                event_log = GranuleEventJobLog.from_json(data)
-                return JobDetails(event_log.job_info)
+                event_log = GranuleEventLog.from_json(data)
+                if event_log.job_info:
+                    return JobDetails(event_log.job_info)
+                else:
+                    return None
 
         raise NoSuchEventAttemptExists(f"Cannot find logs for {event}")
 

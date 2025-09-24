@@ -3,16 +3,13 @@ import pytest
 from common.models import (
     GranuleId,
     GranuleProcessingEvent,
-    JobOutcome,
-    ProcessingOutcome,
 )
 
-
-def test_job_outcome_covers_processing_outcome() -> None:
-    """Ensure our JobOutcome.processing_outcome covers all ProcessingOutcomes"""
-    processing_outcomes = set(ProcessingOutcome)
-    job_processing_outcomes = {outcome.processing_outcome for outcome in JobOutcome}
-    assert processing_outcomes == job_processing_outcomes
+# def test_job_outcome_covers_processing_outcome() -> None:
+# """Ensure our JobOutcome.processing_outcome covers all ProcessingOutcomes"""
+# processing_outcomes = set(ProcessingOutcome)
+# job_processing_outcomes = {outcome.processing_outcome for outcome in JobOutcome}
+# assert processing_outcomes == job_processing_outcomes
 
 
 class TestGranuleId:

@@ -20,6 +20,8 @@ class ProcessingOutcome(Enum):
 
     SUCCESS = auto()
     FAILURE = auto()
+    AWAITING = auto()
+    SUBMITTED = auto()
 
 
 @unique

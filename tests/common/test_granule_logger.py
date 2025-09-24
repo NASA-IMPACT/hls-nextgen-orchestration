@@ -47,6 +47,59 @@ class TestGranuleLoggerService:
         assert test_event == event
         assert test_outcome == outcome
 
+    def test_log_new_granule(
+        self,
+        service: GranuleLoggerService,
+        granule_id: GranuleId,
+    ) -> None:
+        event = GranuleProcessingEvent(granule_id=str(granule_id), attempt=0)
+        service.put_event(event, ProcessingOutcome.AWAITING)
+        list_events = service.list_events(granule_id)
+        details = service.get_event_details(event)
+        assert details is None
+        assert ProcessingOutcome.AWAITING in list_events
+
+        service.put_event(event, ProcessingOutcome.SUBMITTED)
+        list_events = service.list_events(granule_id)
+        assert ProcessingOutcome.AWAITING not in list_events
+        assert ProcessingOutcome.SUBMITTED in list_events
+
+    def test_full_lifecycle(
+        self,
+        service: GranuleLoggerService,
+        granule_id: GranuleId,
+        job_detail_failed_spot: JobDetailTypeDef,
+    ) -> None:
+        event = GranuleProcessingEvent(granule_id=str(granule_id), attempt=0)
+        service.put_event(event, ProcessingOutcome.AWAITING)
+        service.put_event(event, ProcessingOutcome.SUBMITTED)
+
+        list_events = service.list_events(granule_id)
+        assert ProcessingOutcome.AWAITING not in list_events
+
+        batch_details = job_detail_failed_spot.copy()
+        fail_event = GranuleProcessingEvent(str(granule_id), 0)
+        batch_details["container"]["environment"] = fail_event.to_environment()
+        batch_details["container"].pop("exitCode", None)  # spot failure
+        details = JobDetails(batch_details)
+
+        service.put_event_details(details)
+
+        list_events = service.list_events(granule_id)
+        assert ProcessingOutcome.SUBMITTED not in list_events
+        assert ProcessingOutcome.FAILURE in list_events
+
+        batch_details = job_detail_failed_spot.copy()
+        succes_event = fail_event.new_attempt()
+        batch_details["container"]["environment"] = succes_event.to_environment()
+        batch_details["container"]["exitCode"] = 0
+        details = JobDetails(batch_details)
+
+        service.put_event_details(details)
+        list_events = service.list_events(granule_id)
+        assert ProcessingOutcome.FAILURE not in list_events
+        assert ProcessingOutcome.SUCCESS in list_events
+
     def test_log_failure_and_success(
         self,
         service: GranuleLoggerService,

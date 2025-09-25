@@ -30,13 +30,8 @@ class StackSettings(BaseSettings):
     # to using the DAAC `/s3credentials` endpoint to provide temporary credentials.
     #
     # We expect this credential to exist in SecretsManager already!
-    EDL_USER_PASS_CREDENTIALS_SECRET_NAME: str
 
     # Whether to enable use and scheduling of credential rotation.
-    SCHEDULE_LPDAAC_CREDS_ROTATION: bool = False
-
-    # ----- Queue feeder
-    SCHEDULE_QUEUE_FEEDER: bool = True
 
     # ----- Buckets
     # Job processing bucket for state (inventories, failures, etc)
@@ -54,18 +49,15 @@ class StackSettings(BaseSettings):
         str, BeforeValidator(include_trailing_slash)
     ] = "logs-inventories/"
 
-    # LDPAAC private input bucket (*tif files)
-    LPDAAC_PROTECTED_BUCKET_NAME: str
-    # LPDAAC metadata input bucket (STAC Items & thumbnails)
-    LPDAAC_PUBLIC_BUCKET_NAME: str
+    SENTINEL_BUCKET_NAME: str
 
-    # Output bucket for HLS-VI output files
+    # Output bucket for HLS output files
     OUTPUT_BUCKET_NAME: str
 
     # Debug bucket (optional, but useful for avoiding triggering LPDAAC ingest)
     DEBUG_BUCKET_NAME: str | None = None
 
-    # ----- HLS-VI processing
+    # ----- HLS processing
     PROCESSING_CONTAINER_ECR_URI: str
     # Job vCPU and memory limits
     PROCESSING_JOB_VCPU: int = 1
@@ -90,11 +82,6 @@ class StackSettings(BaseSettings):
 
     # Cluster scaling max
     BATCH_MAX_VCPU: int = 10
-
-    # ----- Job feeder
-    FEEDER_EXECUTION_SCHEDULE_RATE_MINUTES: int = 60
-    FEEDER_MAX_ACTIVE_JOBS: int = 10_000
-    FEEDER_GRANULE_SUBMIT_COUNT: int = 50  # 5_000
 
     # ----- Job retry system
     # Send retryable failed AWS Batch jobs to this queue

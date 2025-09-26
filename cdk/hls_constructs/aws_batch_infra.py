@@ -112,7 +112,7 @@ class BatchInfra(Construct):
             minv_cpus=0,
             maxv_cpus=max_vcpu,
             vpc_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+                subnet_type=ec2.SubnetType.PUBLIC,
             ),
             vpc=vpc,
             terminate_on_update=False,

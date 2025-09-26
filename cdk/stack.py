@@ -1,13 +1,11 @@
 import os
-from typing import Any
+from typing import Any, Dict
 
 import jsii
 from aws_cdk import (
-    CfnOutput,
     DockerVolume,
     Duration,
     RemovalPolicy,
-    Size,
     Stack,
     aws_batch as batch,
     aws_ec2 as ec2,
@@ -17,7 +15,7 @@ from aws_cdk import (
     aws_lambda as lambda_,
     aws_lambda_python_alpha as lambda_python,
     aws_s3 as s3,
-    aws_secretsmanager as secretsmanager,
+    aws_s3_notifications as s3_notifications,
     aws_sqs as sqs,
 )
 from constructs import Construct
@@ -90,7 +88,7 @@ class UvHooks:
         ]
 
 
-class HlsViStack(Stack):
+class HlsStack(Stack):
     """HLS-VI historical processing CDK stack."""
 
     def __init__(
@@ -124,17 +122,6 @@ class HlsViStack(Stack):
         # ----------------------------------------------------------------------
         # Buckets
         # ----------------------------------------------------------------------
-        self.lpdaac_protected_bucket = s3.Bucket.from_bucket_name(
-            self,
-            "LpdaacProtectedBucket",
-            bucket_name=settings.LPDAAC_PROTECTED_BUCKET_NAME,
-        )
-        self.lpdaac_public_bucket = s3.Bucket.from_bucket_name(
-            self,
-            "LpdaacPublicBucket",
-            bucket_name=settings.LPDAAC_PUBLIC_BUCKET_NAME,
-        )
-
         self.output_bucket = s3.Bucket.from_bucket_name(
             self,
             "OutputBucket",
@@ -145,6 +132,24 @@ class HlsViStack(Stack):
             self,
             "ProcessingBucket",
             bucket_name=settings.PROCESSING_BUCKET_NAME,
+            removal_policy=RemovalPolicy.DESTROY,
+            lifecycle_rules=[
+                # Setting expired_object_delete_marker cannot be done within a
+                # lifecycle rule that also specifies expiration, expiration_date, or
+                # tag_filters.
+                s3.LifecycleRule(expired_object_delete_marker=True),
+                s3.LifecycleRule(
+                    abort_incomplete_multipart_upload_after=Duration.days(1),
+                    noncurrent_version_expiration=Duration.days(1),
+                ),
+            ],
+            encryption=s3.BucketEncryption.S3_MANAGED,
+        )
+
+        self.sentinel_bucket = s3.Bucket(
+            self,
+            "SentinelBucket",
+            bucket_name=settings.SENTINEL_BUCKET_NAME,
             removal_policy=RemovalPolicy.DESTROY,
             lifecycle_rules=[
                 # Setting expired_object_delete_marker cannot be done within a
@@ -236,68 +241,11 @@ class HlsViStack(Stack):
         )
 
         # ----------------------------------------------------------------------
-        # Earthdata Login (EDL) S3 credential rotator
-        #
-        # This was originally required before the IAM roles for this pipeline were
-        # added to the LPDAAC bucket policies. We keep it in the stack in case
-        # those permissions are removed because that happened in the past.
-        #
-        # ----------------------------------------------------------------------
-        # NB - this secret must be created by developer team
-        self.edl_user_pass_credentials = secretsmanager.Secret.from_secret_name_v2(
-            self,
-            id="EdlUserPassCredentials",
-            secret_name=settings.EDL_USER_PASS_CREDENTIALS_SECRET_NAME,
-        )
-
-        self.edl_s3_credentials = secretsmanager.Secret(
-            self,
-            id="EdlS3Credentials",
-            secret_name=f"hls-vi-historical-orchestration/{settings.STAGE}/edl-s3-credentials",
-            description="Temporary AWS credentials for accessing LPDAAC S3 buckets.",
-        )
-
-        # This Lambda sets the following keys in the `edl_s3_credentials` Secret,
-        #   * ACCESS_KEY_ID
-        #   * SECRET_ACCESS_KEY
-        #   * SESSION_TOKEN
-        self.edl_credential_rotator = lambda_python.PythonFunction(
-            self,
-            "EdlCredentialRotator",
-            entry="src/edl_credential_rotator",
-            index="handler.py",
-            handler="handler",
-            runtime=lambda_.Runtime.PYTHON_3_12,
-            memory_size=256,
-            timeout=Duration.minutes(1),
-            environment={
-                "USER_PASS_SECRET_ID": self.edl_user_pass_credentials.secret_arn,
-                "S3_CREDENTIALS_SECRET_ID": self.edl_s3_credentials.secret_arn,
-            },
-        )
-        self.edl_user_pass_credentials.grant_read(self.edl_credential_rotator)
-        self.edl_s3_credentials.grant_write(self.edl_credential_rotator)
-
-        self.edl_credential_rotator_schedule = events.Rule(
-            self,
-            "EdlCredentialRotatorSchedule",
-            schedule=events.Schedule.rate(
-                Duration.minutes(30),
-            ),
-            enabled=settings.SCHEDULE_LPDAAC_CREDS_ROTATION,
-        )
-        self.edl_credential_rotator_schedule.add_target(
-            events_targets.LambdaFunction(
-                handler=self.edl_credential_rotator,
-            )
-        )
-
-        # ----------------------------------------------------------------------
         # AWS Batch infrastructure
         # ----------------------------------------------------------------------
         self.batch_infra = BatchInfra(
             self,
-            "HLS-VI-Infra",
+            "HLS-Batch-Infra",
             vpc=self.vpc,
             instance_classes=settings.BATCH_INSTANCE_CLASSES,
             max_vcpu=settings.BATCH_MAX_VCPU,
@@ -306,26 +254,13 @@ class HlsViStack(Stack):
         )
 
         # ----------------------------------------------------------------------
-        # HLS-VI processing compute job
+        # HLS processing compute job
         # ----------------------------------------------------------------------
-        if settings.SCHEDULE_LPDAAC_CREDS_ROTATION:
-            secrets = {
-                "LPDAAC_SECRET_ACCESS_KEY": batch.Secret.from_secrets_manager(
-                    self.edl_s3_credentials, "SECRET_ACCESS_KEY"
-                ),
-                "LPDAAC_ACCESS_KEY_ID": batch.Secret.from_secrets_manager(
-                    self.edl_s3_credentials, "ACCESS_KEY_ID"
-                ),
-                "LPDAAC_SESSION_TOKEN": batch.Secret.from_secrets_manager(
-                    self.edl_s3_credentials, "SESSION_TOKEN"
-                ),
-            }
-        else:
-            secrets = {}
+        secrets: Dict[str, batch.Secret] = {}
 
         self.processing_job = BatchJob(
             self,
-            "HLS-VI-Processing",
+            "HLS-Processing",
             container_ecr_uri=settings.PROCESSING_CONTAINER_ECR_URI,
             vcpu=settings.PROCESSING_JOB_VCPU,
             memory_mb=settings.PROCESSING_JOB_MEMORY_MB,
@@ -339,122 +274,8 @@ class HlsViStack(Stack):
         )
         self.processing_bucket.grant_read_write(self.processing_job.role)
         self.output_bucket.grant_read_write(self.processing_job.role)
-        self.lpdaac_protected_bucket.grant_read(self.processing_job.role)
-        self.lpdaac_public_bucket.grant_read(self.processing_job.role)
-        self.edl_s3_credentials.grant_read(self.processing_job.role)
         if self.debug_bucket is not None:
             self.debug_bucket.grant_read(self.processing_job.role)
-
-        # ----------------------------------------------------------------------
-        # One-off inventory conversion Lambda
-        # ----------------------------------------------------------------------
-        self.inventory_converter_lambda = lambda_python.PythonFunction(
-            self,
-            "InventoryConverterHandler",
-            entry="src/",
-            index="inventory_converter/handler.py",
-            handler="handler",
-            runtime=lambda_.Runtime.PYTHON_3_12,
-            memory_size=1024,
-            timeout=Duration.minutes(10),
-            environment={
-                "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
-                "PROCESSING_BUCKET_GRANULE_INVENTORY_PREFIX": (
-                    settings.PROCESSING_BUCKET_GRANULE_INVENTORY_PREFIX
-                ),
-            },
-            bundling=lambda_python.BundlingOptions(
-                command_hooks=UvHooks(groups=["arrow"]),
-                asset_excludes=LAMBDA_EXCLUDE,
-                volumes=UV_DOCKER_VOLUMES,
-            ),
-            ephemeral_storage_size=Size.mebibytes(2500),
-        )
-        self.processing_bucket.grant_read_write(
-            self.inventory_converter_lambda,
-            objects_key_pattern=f"{settings.PROCESSING_BUCKET_GRANULE_INVENTORY_PREFIX}*",
-        )
-
-        # ----------------------------------------------------------------------
-        # Queue feeder
-        # ----------------------------------------------------------------------
-        self.queue_feeder_lambda = lambda_python.PythonFunction(
-            self,
-            "QueueFeederHandler",
-            entry="src/",
-            index="queue_feeder/handler.py",
-            handler="handler",
-            runtime=lambda_.Runtime.PYTHON_3_12,
-            memory_size=512,
-            timeout=Duration.minutes(10),
-            reserved_concurrent_executions=1,
-            environment={
-                "FEEDER_MAX_ACTIVE_JOBS": str(settings.FEEDER_MAX_ACTIVE_JOBS),
-                "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
-                "PROCESSING_BUCKET_GRANULE_INVENTORY_PREFIX": (
-                    settings.PROCESSING_BUCKET_GRANULE_INVENTORY_PREFIX
-                ),
-                "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
-                "BATCH_JOB_DEFINITION_NAME": (
-                    self.processing_job.job_def.job_definition_name
-                ),
-                **bucket_envvars,
-            },
-            bundling=lambda_python.BundlingOptions(
-                command_hooks=UvHooks(groups=["arrow"]),
-                asset_excludes=LAMBDA_EXCLUDE,
-                volumes=UV_DOCKER_VOLUMES,
-            ),
-        )
-
-        self.processing_bucket.grant_read_write(
-            self.queue_feeder_lambda,
-        )
-
-        # Ref: AWS Batch IAM actions/resources/conditions
-        # https://docs.aws.amazon.com/service-authorization/latest/reference/list_awsbatch.html
-        self.queue_feeder_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                resources=[
-                    self.batch_infra.queue.job_queue_arn,
-                    self.processing_job.job_def_arn_without_revision,
-                ],
-                actions=[
-                    "batch:SubmitJob",
-                ],
-            )
-        )
-        self.queue_feeder_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                resources=["*"],
-                actions=[
-                    "batch:ListJobs",
-                ],
-            )
-        )
-
-        # Schedule queue feeder
-        self.queue_feeder_schedule = events.Rule(
-            self,
-            "QueueFeederSchedule",
-            schedule=events.Schedule.rate(
-                Duration.minutes(settings.FEEDER_EXECUTION_SCHEDULE_RATE_MINUTES),
-            ),
-            enabled=settings.SCHEDULE_QUEUE_FEEDER,
-        )
-        self.queue_feeder_schedule.add_target(
-            events_targets.LambdaFunction(
-                event=events.RuleTargetInput.from_object(
-                    {
-                        "granule_submit_count": settings.FEEDER_GRANULE_SUBMIT_COUNT,
-                    }
-                ),
-                handler=self.queue_feeder_lambda,
-                retry_attempts=3,
-            ),
-        )
 
         # ----------------------------------------------------------------------
         # Job monitor & retry system
@@ -575,18 +396,17 @@ class HlsViStack(Stack):
         self.processing_bucket.grant_read_write(
             self.job_requeuer_lambda, objects_key_pattern="logs/*"
         )
-        self.job_requeuer_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                resources=[
-                    self.batch_infra.queue.job_queue_arn,
-                    self.processing_job.job_def_arn_without_revision,
-                ],
-                actions=[
-                    "batch:SubmitJob",
-                ],
-            )
+        self.batch_sumbit_job_policy = iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            resources=[
+                self.batch_infra.queue.job_queue_arn,
+                self.processing_job.job_def_arn_without_revision,
+            ],
+            actions=[
+                "batch:SubmitJob",
+            ],
         )
+        self.job_requeuer_lambda.add_to_role_policy(self.batch_sumbit_job_policy)
         self.job_retry_queue.grant_consume_messages(self.job_requeuer_lambda)
 
         # Requeuer consumes from queue that the "job monitor" publishes to
@@ -598,9 +418,26 @@ class HlsViStack(Stack):
             event_source_arn=self.job_retry_queue.queue_arn,
         )
 
-        # ===== Cloudformation outputs needed by admin tools
-        CfnOutput(
+        self.granule_queuer_lambda = lambda_python.PythonFunction(
             self,
-            "QueueFeederLambda",
-            value=self.queue_feeder_lambda.function_arn,
+            "GranuleQueuerLambda",
+            entry="src/",
+            index="granule_queuer/handler.py",
+            handler="handler",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            memory_size=512,
+            timeout=Duration.minutes(10),
+            bundling=lambda_python.BundlingOptions(
+                command_hooks=UvHooks(),
+                asset_excludes=LAMBDA_EXCLUDE,
+                volumes=UV_DOCKER_VOLUMES,
+            ),
         )
+
+        self.sentinel_bucket.grant_read(self.granule_queuer_lambda)
+
+        self.sentinel_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3_notifications.LambdaDestination(self.granule_queuer_lambda),
+        )
+        self.granule_queuer_lambda.add_to_role_policy(self.batch_sumbit_job_policy)

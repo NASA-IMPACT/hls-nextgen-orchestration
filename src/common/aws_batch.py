@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 import boto3
 
-from common.models import GranuleProcessingEvent, JobOutcome
+from common.models import GranuleProcessingEvent, ProcessingState
 
 if TYPE_CHECKING:
     from mypy_boto3_batch.client import BatchClient
@@ -77,19 +77,19 @@ class JobDetails:
         """Return verbose details about this job"""
         return self.detail
 
-    def get_job_outcome(self) -> JobOutcome:
-        """Return the outcome of this job"""
+    def get_job_state(self) -> ProcessingState:
+        """Return the state of this job"""
         if self.exit_code == 0:
-            return JobOutcome.SUCCESS
+            return ProcessingState.SUCCESS
 
         # Jobs that are killed by Spot interruptions won't have an error code,
         # but neither will jobs that are cancelled or terminated.
         # Note that this behavior is coupled to the "retryStrategy" config for
         # the deployed AWS Batch JobDefinition.
         if self.exit_code is None and self.status_reason.startswith("Host EC2"):
-            return JobOutcome.FAILURE_RETRYABLE
+            return ProcessingState.FAILURE_RETRYABLE
 
-        return JobOutcome.FAILURE_NONRETRYABLE
+        return ProcessingState.FAILURE_NONRETRYABLE
 
     def get_granule_event(self) -> GranuleProcessingEvent:
         """Return the granule processing event details for this job"""

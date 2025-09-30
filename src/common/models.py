@@ -11,35 +11,19 @@ if TYPE_CHECKING:
 
 
 @unique
-class ProcessingOutcome(Enum):
-    """Potential outcomes for granule processing
-
-    Individual jobs may succeed or fail in various ways, but ultimately
-    the processing of a granule may only be a success or failure.
-    """
+class ProcessingState(Enum):
+    """Potential state for granule processing"""
 
     SUCCESS = auto()
-    FAILURE = auto()
+    FAILURE_RETRYABLE = auto()
+    FAILURE_NONRETRYABLE = auto()
     AWAITING = auto()
     SUBMITTED = auto()
 
 
-@unique
-class JobOutcome(Enum):
-    """Potential outcomes for a compute job (e.g., with AWS Batch)
-
-    This enum describes a job attempt of processing a granule. Failures of a
-    job may be retryable due to infrastructure or ephemeral issues.
-    """
-
-    SUCCESS = auto(), ProcessingOutcome.SUCCESS
-    FAILURE_RETRYABLE = auto(), ProcessingOutcome.FAILURE
-    FAILURE_NONRETRYABLE = auto(), ProcessingOutcome.FAILURE
-
-    @property
-    def processing_outcome(self) -> ProcessingOutcome:
-        """The ProcessingOutcome for this job outcome"""
-        return self.value[1]
+class ProcessingStep(Enum):
+    CLOUD_MASKING = auto()
+    ATMOSPHERIC_COMPENSATION = auto()
 
 
 HLS_GRANULE_ID_STRFTIME = "%Y%jT%H%M%S"

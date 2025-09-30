@@ -18,8 +18,7 @@ from common.aws_batch import (
 from common.models import (
     GranuleId,
     GranuleProcessingEvent,
-    JobOutcome,
-    ProcessingOutcome,
+    ProcessingState,
 )
 
 if TYPE_CHECKING:
@@ -38,7 +37,7 @@ class GranuleEventLog:
 
     granule_id: str
     attempt: int
-    outcome: JobOutcome | ProcessingOutcome
+    state: ProcessingState
     job_info: Optional[JobDetailTypeDef] = None
 
     def to_json(self) -> str:
@@ -47,7 +46,7 @@ class GranuleEventLog:
             {
                 "granule_id": self.granule_id,
                 "attempt": self.attempt,
-                "outcome": self.outcome.name,
+                "state": self.state.name,
                 "job_info": self.job_info,
             }
         )
@@ -57,15 +56,11 @@ class GranuleEventLog:
         """Load from JSON"""
         data = json.loads(json_str)
         job_info = data.get("job_info")
-        outcome: JobOutcome | ProcessingOutcome | None = None
-        if job_info:
-            outcome = JobOutcome[data["outcome"]]
-        else:
-            outcome = ProcessingOutcome[data["outcome"]]
+        state = ProcessingState[data["state"]]
         return cls(
             granule_id=data["granule_id"],
             attempt=data["attempt"],
-            outcome=outcome,
+            state=state,
             job_info=job_info,
         )
 
@@ -74,24 +69,25 @@ class GranuleEventLog:
 class GranuleLoggerService:
     """Log granule processing details
 
-    The granule logger describes outcomes from "granule processing events"
-    by using S3 as a store for logs and outcome breadcrumbs. In order to
+    The granule logger describes staates from "granule processing events"
+    by using S3 as a store for logs and state breadcrumbs. In order to
     predictably list or search for information about our granule processing
     system this organizes log information into a set of prefixes based on
     information:
 
     ```
-    ./logs/outcome={outcome}/acquisition_date={YYYY-MM-DD}/granule_id={GRANULE_ID}/
+    ./logs/state={state}/acquisition_date={YYYY-MM-DD}/granule_id={GRANULE_ID}/
     ```
 
-    This organizes logs by outcome ("success" or "failure") first as we anticipate
-    wanting to search and analyze jobs that have "failed" more than the successes.
+    This organizes logs by state("success", "failure", "submitted", "awaiting")
+    first as we anticipate wanting to search and analyze jobs that have "failed"
+    more than the successes.
 
     Within each prefix job attempts are organized by the attempt. For example:
 
     ```
-    ./logs/outcome=failure/acquisition_date={YYYY-MM-DD}/granule_id={GRANULE_ID}/attempt=1.json
-    ./logs/outcome=success/acquisition_date={YYYY-MM-DD}/granule_id={GRANULE_ID}/attempt=2.json
+    ./logs/state=failure/acquisition_date={YYYY-MM-DD}/granule_id={GRANULE_ID}/attempt=1.json
+    ./logs/state=success/acquisition_date={YYYY-MM-DD}/granule_id={GRANULE_ID}/attempt=2.json
     ```
 
     When a successful attempt has been logged, any previous attempts that had failures
@@ -103,22 +99,23 @@ class GranuleLoggerService:
     logs_prefix: str
     bsm: BotoSesManager = field(default_factory=BotoSesManager)
 
-    # mapping of ProcessingOutcome to S3 path component
-    outcome_to_prefix: ClassVar[dict[ProcessingOutcome, str]] = {
-        ProcessingOutcome.SUCCESS: "success",
-        ProcessingOutcome.FAILURE: "failure",
-        ProcessingOutcome.AWAITING: "awaiting",
-        ProcessingOutcome.SUBMITTED: "submitted",
+    # mapping of ProcessingState to S3 path component
+    state_to_prefix: ClassVar[dict[ProcessingState, str]] = {
+        ProcessingState.SUCCESS: "success",
+        ProcessingState.FAILURE_NONRETRYABLE: "failure_nonretryable",
+        ProcessingState.FAILURE_RETRYABLE: "failure_retryable",
+        ProcessingState.AWAITING: "awaiting",
+        ProcessingState.SUBMITTED: "submitted",
     }
-    prefix_to_outcome: ClassVar[dict[str, ProcessingOutcome]] = {
-        value: key for key, value in outcome_to_prefix.items()
+    prefix_to_state: ClassVar[dict[str, ProcessingState]] = {
+        value: key for key, value in state_to_prefix.items()
     }
 
     # regex to parse the log object into components
     log_path_regex: ClassVar[re.Pattern[str]] = re.compile(
         "/".join(
             [
-                r"outcome=(?P<outcome>\w+)",
+                r"state=(?P<state>\w+)",
                 r"platform=(?P<platform>\w+)",
                 r"acquisition_date=(?P<acquisition_date>[\d-]+)",
                 r"granule_id=(?P<granule_id>[\w\.]+)",
@@ -129,36 +126,36 @@ class GranuleLoggerService:
     # regex to match on attempt object name
     attempt_log_regex: ClassVar[re.Pattern[str]] = re.compile(r"^attempt=[0-9]+\.json$")
 
-    def _prefix_for_granule_id_outcome(
-        self, granule_id: GranuleId, outcome: ProcessingOutcome
+    def _prefix_for_granule_id_state(
+        self, granule_id: GranuleId, state: ProcessingState
     ) -> S3Path:
         """Return the S3 path for storing this granule's info"""
         date = granule_id.begin_datetime.strftime("%Y-%m-%d")
         return S3Path(
             self.bucket,
             self.logs_prefix.rstrip("/"),
-            f"outcome={self.outcome_to_prefix[outcome]}",
+            f"state={self.state_to_prefix[state]}",
             f"platform={granule_id.platform}",
             f"acquisition_date={date}",
             f"granule_id={str(granule_id)}",
         )
 
-    def _path_for_event_outcome(
+    def _path_for_event_state(
         self,
         event: GranuleProcessingEvent,
-        outcome: ProcessingOutcome,
+        state: ProcessingState,
     ) -> S3Path:
         granule_id = GranuleId.from_str(event.granule_id)
-        prefix = self._prefix_for_granule_id_outcome(granule_id, outcome)
+        prefix = self._prefix_for_granule_id_state(granule_id, state)
         return S3Path(prefix, f"attempt={event.attempt}.json")
 
-    def _path_to_event_outcome(
+    def _path_to_event_state(
         self,
         log_artifact: S3Path,
-    ) -> tuple[GranuleProcessingEvent, ProcessingOutcome]:
+    ) -> tuple[GranuleProcessingEvent, ProcessingState]:
         """Determine an event info from a log artifact path
 
-        This is the inverse of the `_path_for_event_outcome`
+        This is the inverse of the `_path_for_event_state`
         """
         path = log_artifact.key.removeprefix(self.logs_prefix).lstrip("/")
         match = self.log_path_regex.match(path)
@@ -169,71 +166,78 @@ class GranuleLoggerService:
 
         granule_id = match.group("granule_id")
         attempt = int(match.group("attempt"))
-        outcome = self.prefix_to_outcome[match.group("outcome")]
+        state = self.prefix_to_state[match.group("state")]
 
         return (
             GranuleProcessingEvent(granule_id, attempt),
-            outcome,
+            state,
         )
 
     def _filter_attempt_log(self, path: S3Path) -> bool:
         return bool(self.attempt_log_regex.match(path.basename))
 
-    def _list_logs_for_outcome(
-        self, granule_id: str, outcome: ProcessingOutcome
+    def _list_logs_for_state(
+        self, granule_id: str, state: ProcessingState
     ) -> list[S3Path]:
-        """Helper function to find logs for some outcome"""
-        prefix = self._prefix_for_granule_id_outcome(
-            GranuleId.from_str(granule_id), outcome
+        """Helper function to find logs for some state"""
+        prefix = self._prefix_for_granule_id_state(
+            GranuleId.from_str(granule_id), state
         )
         paths = []
         for path in prefix.iter_objects(bsm=self.bsm).filter(self._filter_attempt_log):
             paths.append(path)
         return paths
 
-    def _clean_previous_states(
-        self, granule_id: str, outcome: ProcessingOutcome
-    ) -> None:
+    def _clean_previous_states(self, granule_id: str, state: ProcessingState) -> None:
         """Cleanup previous states"""
-        for outcome_path in self._list_logs_for_outcome(granule_id, outcome):
-            event, outcome = self._path_to_event_outcome(outcome_path)
-            if outcome == ProcessingOutcome.FAILURE:
-                success_path = self._path_for_event_outcome(
-                    event, ProcessingOutcome.SUCCESS
+        for state_path in self._list_logs_for_state(granule_id, state):
+            event, state = self._path_to_event_state(state_path)
+            if state in (
+                ProcessingState.FAILURE_NONRETRYABLE,
+                ProcessingState.FAILURE_RETRYABLE,
+            ):
+                success_path = self._path_for_event_state(
+                    event, ProcessingState.SUCCESS
                 )
-                outcome_path.copy_to(success_path, bsm=self.bsm, overwrite=True)
-            outcome_path.delete(bsm=self.bsm)
+                state_path.copy_to(success_path, bsm=self.bsm, overwrite=True)
+            state_path.delete(bsm=self.bsm)
 
-    def put_event(
-        self, event: GranuleProcessingEvent, outcome: ProcessingOutcome
-    ) -> None:
-        s3path = self._path_for_event_outcome(event=event, outcome=outcome)
+    def put_event(self, event: GranuleProcessingEvent, state: ProcessingState) -> None:
+        s3path = self._path_for_event_state(event=event, state=state)
         event_log = GranuleEventLog(
             granule_id=event.granule_id,
             attempt=event.attempt,
-            outcome=outcome,
+            state=state,
         )
 
         s3path.write_text(event_log.to_json(), bsm=self.bsm)
-        if outcome == ProcessingOutcome.SUBMITTED:
-            self._clean_previous_states(event.granule_id, ProcessingOutcome.AWAITING)
+        if state == ProcessingState.SUBMITTED:
+            self._clean_previous_states(event.granule_id, ProcessingState.AWAITING)
 
     def put_event_details(self, details: JobDetails) -> None:
         """Log event details"""
         event = details.get_granule_event()
-        job_outcome = details.get_job_outcome()
-        s3path = self._path_for_event_outcome(event, job_outcome.processing_outcome)
+        job_state = details.get_job_state()
+        s3path = self._path_for_event_state(event, job_state)
         event_log = GranuleEventLog(
             granule_id=event.granule_id,
             attempt=event.attempt,
-            outcome=job_outcome,
+            state=job_state,
             job_info=details.get_job_info(),
         )
         s3path.write_text(event_log.to_json(), bsm=self.bsm)
-        if job_outcome.processing_outcome == ProcessingOutcome.FAILURE:
-            self._clean_previous_states(event.granule_id, ProcessingOutcome.SUBMITTED)
-        if job_outcome.processing_outcome == ProcessingOutcome.SUCCESS:
-            self._clean_previous_states(event.granule_id, ProcessingOutcome.FAILURE)
+        if job_state in (
+            ProcessingState.FAILURE_NONRETRYABLE,
+            ProcessingState.FAILURE_RETRYABLE,
+        ):
+            self._clean_previous_states(event.granule_id, ProcessingState.SUBMITTED)
+        if job_state == ProcessingState.SUCCESS:
+            self._clean_previous_states(
+                event.granule_id, ProcessingState.FAILURE_NONRETRYABLE
+            )
+            self._clean_previous_states(
+                event.granule_id, ProcessingState.FAILURE_RETRYABLE
+            )
 
     def get_event_details(self, event: GranuleProcessingEvent) -> JobDetails | None:
         """Get event details for an event
@@ -243,8 +247,8 @@ class GranuleLoggerService:
         NoSuchEventAttemptExists
             Raised if the event provided doesn't exist in the logs
         """
-        for outcome in ProcessingOutcome:
-            path = self._path_for_event_outcome(event, outcome)
+        for state in ProcessingState:
+            path = self._path_for_event_state(event, state)
             try:
                 data = path.read_text(bsm=self.bsm)
             except ClientError as e:
@@ -260,18 +264,18 @@ class GranuleLoggerService:
         raise NoSuchEventAttemptExists(f"Cannot find logs for {event}")
 
     def list_events(
-        self, granule_id: str | GranuleId, outcome: ProcessingOutcome | None = None
-    ) -> dict[ProcessingOutcome, list[GranuleProcessingEvent]]:
-        """List events by outcome"""
-        if outcome:
-            outcomes = [outcome]
+        self, granule_id: str | GranuleId, state: ProcessingState | None = None
+    ) -> dict[ProcessingState, list[GranuleProcessingEvent]]:
+        """List events by state"""
+        if state:
+            states = [state]
         else:
-            outcomes = list(ProcessingOutcome)
+            states = list(ProcessingState)
 
         events = defaultdict(list)
-        for outcome in outcomes:
-            for path in self._list_logs_for_outcome(str(granule_id), outcome):
-                event, outcome = self._path_to_event_outcome(path)
-                events[outcome].append(event)
+        for state in states:
+            for path in self._list_logs_for_state(str(granule_id), state):
+                event, state = self._path_to_event_state(path)
+                events[state].append(event)
 
         return dict(events)

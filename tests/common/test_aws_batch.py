@@ -10,7 +10,7 @@ from mypy_boto3_batch import BatchClient
 from mypy_boto3_batch.type_defs import JobDetailTypeDef
 from pytest_lazy_fixtures import lf
 
-from common import GranuleProcessingEvent, JobOutcome
+from common import GranuleProcessingEvent, ProcessingState
 from common.aws_batch import AwsBatchClient, JobDetails
 
 
@@ -40,31 +40,31 @@ class TestJobDetail:
         job_detail = JobDetails(detail)
         assert job_detail.exit_code == exit_code
 
-    def test_get_job_outcome(self, job_detail_failed_error: JobDetailTypeDef) -> None:
+    def test_get_job_state(self, job_detail_failed_error: JobDetailTypeDef) -> None:
         """Test we correctly parse the job outcome"""
         detail = job_detail_failed_error.copy()
         detail["container"]["exitCode"] = 1
-        outcome = JobDetails(detail).get_job_outcome()
-        assert outcome == JobOutcome.FAILURE_NONRETRYABLE
+        outcome = JobDetails(detail).get_job_state()
+        assert outcome == ProcessingState.FAILURE_NONRETRYABLE
 
         detail = job_detail_failed_error.copy()
         detail["container"]["exitCode"] = 0
-        outcome = JobDetails(detail).get_job_outcome()
-        assert outcome == JobOutcome.SUCCESS
+        outcome = JobDetails(detail).get_job_state()
+        assert outcome == ProcessingState.SUCCESS
 
         # SPOT interruption
         detail = deepcopy(job_detail_failed_error)
         del detail["container"]["exitCode"]
         detail["statusReason"] = "Host EC2 (instance i-01225b700440f4809) terminated."
-        outcome = JobDetails(detail).get_job_outcome()
-        assert outcome == JobOutcome.FAILURE_RETRYABLE
+        outcome = JobDetails(detail).get_job_state()
+        assert outcome == ProcessingState.FAILURE_RETRYABLE
 
         # Cancelled job
         detail = job_detail_failed_error.copy()
         del detail["container"]["exitCode"]
         detail["statusReason"] = "Manually cancelling this job"
-        outcome = JobDetails(detail).get_job_outcome()
-        assert outcome == JobOutcome.FAILURE_NONRETRYABLE
+        outcome = JobDetails(detail).get_job_state()
+        assert outcome == ProcessingState.FAILURE_NONRETRYABLE
 
     def test_get_granule_event_details(
         self, job_detail_failed_error: JobDetailTypeDef

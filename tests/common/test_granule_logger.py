@@ -69,6 +69,7 @@ class TestGranuleLoggerService:
         service: GranuleLoggerService,
         granule_id: GranuleId,
         job_detail_failed_spot: JobDetailTypeDef,
+        job_detail_failed_error: JobDetailTypeDef,
     ) -> None:
         event = GranuleProcessingEvent(granule_id=str(granule_id), attempt=0)
         service.put_event(event, ProcessingState.AWAITING)
@@ -90,14 +91,34 @@ class TestGranuleLoggerService:
         assert ProcessingState.FAILURE_RETRYABLE in list_events
 
         batch_details = job_detail_failed_spot.copy()
-        succes_event = fail_event.new_attempt()
-        batch_details["container"]["environment"] = succes_event.to_environment()
+        success_event = fail_event.new_attempt()
+        batch_details["container"]["environment"] = success_event.to_environment()
         batch_details["container"]["exitCode"] = 0
         details = JobDetails(batch_details)
 
         service.put_event_details(details)
         list_events = service.list_events(granule_id)
         assert ProcessingState.FAILURE_RETRYABLE not in list_events
+        assert ProcessingState.SUBMITTED not in list_events
+        assert ProcessingState.SUCCESS in list_events
+
+        # Test success on first job attempt
+        event = GranuleProcessingEvent(granule_id=str(granule_id), attempt=0)
+        service.put_event(event, ProcessingState.AWAITING)
+        service.put_event(event, ProcessingState.SUBMITTED)
+
+        list_events = service.list_events(granule_id)
+        assert ProcessingState.AWAITING not in list_events
+
+        batch_details = job_detail_failed_error.copy()
+        batch_details["container"]["environment"] = event.to_environment()
+        batch_details["container"]["exitCode"] = 0
+        details = JobDetails(batch_details)
+
+        service.put_event_details(details)
+
+        list_events = service.list_events(granule_id)
+        assert ProcessingState.SUBMITTED not in list_events
         assert ProcessingState.SUCCESS in list_events
 
     def test_log_failure_and_success(

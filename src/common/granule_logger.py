@@ -195,6 +195,7 @@ class GranuleLoggerService:
             if state in (
                 ProcessingState.FAILURE_NONRETRYABLE,
                 ProcessingState.FAILURE_RETRYABLE,
+                ProcessingState.SUBMITTED,
             ):
                 success_path = self._path_for_event_state(
                     event, ProcessingState.SUCCESS
@@ -238,6 +239,7 @@ class GranuleLoggerService:
             self._clean_previous_states(
                 event.granule_id, ProcessingState.FAILURE_RETRYABLE
             )
+            self._clean_previous_states(event.granule_id, ProcessingState.SUBMITTED)
 
     def get_event_details(self, event: GranuleProcessingEvent) -> JobDetails | None:
         """Get event details for an event

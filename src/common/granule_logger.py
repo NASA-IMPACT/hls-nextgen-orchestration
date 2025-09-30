@@ -192,14 +192,8 @@ class GranuleLoggerService:
         """Cleanup previous states"""
         for state_path in self._list_logs_for_state(granule_id, state):
             event, state = self._path_to_event_state(state_path)
-            if state in (
-                ProcessingState.FAILURE_NONRETRYABLE,
-                ProcessingState.FAILURE_RETRYABLE,
-                ProcessingState.SUBMITTED,
-            ):
-                success_path = self._path_for_event_state(
-                    event, ProcessingState.SUCCESS
-                )
+            if migration_state := state.migrate_logs_to_state():
+                success_path = self._path_for_event_state(event, migration_state)
                 state_path.copy_to(success_path, bsm=self.bsm, overwrite=True)
             state_path.delete(bsm=self.bsm)
 
@@ -212,8 +206,8 @@ class GranuleLoggerService:
         )
 
         s3path.write_text(event_log.to_json(), bsm=self.bsm)
-        if state == ProcessingState.SUBMITTED:
-            self._clean_previous_states(event.granule_id, ProcessingState.AWAITING)
+        for previous_state in state.previous_states():
+            self._clean_previous_states(event.granule_id, previous_state)
 
     def put_event_details(self, details: JobDetails) -> None:
         """Log event details"""
@@ -227,19 +221,8 @@ class GranuleLoggerService:
             job_info=details.get_job_info(),
         )
         s3path.write_text(event_log.to_json(), bsm=self.bsm)
-        if job_state in (
-            ProcessingState.FAILURE_NONRETRYABLE,
-            ProcessingState.FAILURE_RETRYABLE,
-        ):
-            self._clean_previous_states(event.granule_id, ProcessingState.SUBMITTED)
-        if job_state == ProcessingState.SUCCESS:
-            self._clean_previous_states(
-                event.granule_id, ProcessingState.FAILURE_NONRETRYABLE
-            )
-            self._clean_previous_states(
-                event.granule_id, ProcessingState.FAILURE_RETRYABLE
-            )
-            self._clean_previous_states(event.granule_id, ProcessingState.SUBMITTED)
+        for previous_state in job_state.previous_states():
+            self._clean_previous_states(event.granule_id, previous_state)
 
     def get_event_details(self, event: GranuleProcessingEvent) -> JobDetails | None:
         """Get event details for an event

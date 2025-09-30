@@ -20,6 +20,34 @@ class ProcessingState(Enum):
     AWAITING = auto()
     SUBMITTED = auto()
 
+    def previous_states(self) -> tuple[ProcessingState, ...]:
+        """Possible previous states in processing state machine"""
+        match self:
+            case ProcessingState.AWAITING:
+                return ()
+            case ProcessingState.SUBMITTED:
+                return (ProcessingState.AWAITING,)
+            case ProcessingState.FAILURE_NONRETRYABLE:
+                return (ProcessingState.SUBMITTED,)
+            case ProcessingState.FAILURE_RETRYABLE:
+                return (ProcessingState.SUBMITTED,)
+            case ProcessingState.SUCCESS:
+                return (
+                    ProcessingState.SUBMITTED,
+                    ProcessingState.FAILURE_NONRETRYABLE,
+                    ProcessingState.FAILURE_RETRYABLE,
+                )
+
+    def migrate_logs_to_state(self) -> ProcessingState | None:
+        """Whether to copy logs for this state to another state"""
+        match self:
+            case (
+                ProcessingState.SUBMITTED
+                | ProcessingState.FAILURE_NONRETRYABLE
+                | ProcessingState.FAILURE_RETRYABLE
+            ):
+                return ProcessingState.SUCCESS
+
 
 class ProcessingStep(Enum):
     CLOUD_MASKING = auto()

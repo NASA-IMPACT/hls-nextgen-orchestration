@@ -42,9 +42,7 @@ class ProcessingState(Enum):
         """Whether to copy logs for this state to another state"""
         match self:
             case (
-                ProcessingState.SUBMITTED
-                | ProcessingState.FAILURE_NONRETRYABLE
-                | ProcessingState.FAILURE_RETRYABLE
+                ProcessingState.FAILURE_NONRETRYABLE | ProcessingState.FAILURE_RETRYABLE
             ):
                 return ProcessingState.SUCCESS
 

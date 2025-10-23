@@ -16,7 +16,7 @@ from common.models import (
 class TestProcessingState:
     """Sanity checks for enum properties"""
 
-    def test_previous_states(self):
+    def test_previous_states(self) -> None:
         """Ensure enum has exhaustive match for previous states"""
         for state in list(ProcessingState):
             previous_states = state.previous_states()
@@ -26,7 +26,7 @@ class TestProcessingState:
                 for previous_state in previous_states
             )
 
-    def test_migrate_logs_to_state(self):
+    def test_migrate_logs_to_state(self) -> None:
         """Ensure enum has exhaustive match for previous states"""
         for state in list(ProcessingState):
             migrate_state = state.migrate_logs_to_state()

@@ -3,7 +3,7 @@
 import pytest
 from mypy_boto3_batch.type_defs import JobDetailTypeDef
 
-from common import GranuleId, GranuleProcessingEvent, ProcessingOutcome
+from common import GranuleId, GranuleProcessingEvent, ProcessingState
 from common.aws_batch import JobDetails
 from common.granule_logger import GranuleLoggerService
 
@@ -16,10 +16,10 @@ class TestGranuleLoggerService:
         """Return an instance of the service with S3 bucket mocked with moto"""
         return GranuleLoggerService(bucket=bucket, logs_prefix="logs/")
 
-    def test_prefix_to_outcomes_unique(self) -> None:
-        """Sanity check each ProcessingOutcome has a unique prefix"""
-        assert len(GranuleLoggerService.outcome_to_prefix) == len(
-            GranuleLoggerService.prefix_to_outcome
+    def test_prefix_to_state_unique(self) -> None:
+        """Sanity check each ProcessingState has a unique prefix"""
+        assert len(GranuleLoggerService.state_to_prefix) == len(
+            GranuleLoggerService.prefix_to_state
         )
 
     def test_attempt_log_regex(self) -> None:
@@ -29,23 +29,23 @@ class TestGranuleLoggerService:
         assert not GranuleLoggerService.attempt_log_regex.match("attempt=json")
         assert not GranuleLoggerService.attempt_log_regex.match("attempt=42.log")
 
-    @pytest.mark.parametrize("outcome", list(ProcessingOutcome))
-    def test_path_for_event_outcome(
+    @pytest.mark.parametrize("state", list(ProcessingState))
+    def test_path_for_event_state(
         self,
         service: GranuleLoggerService,
         granule_id: GranuleId,
-        outcome: ProcessingOutcome,
+        state: ProcessingState,
     ) -> None:
-        """Test correctly construct and infer S3Path for an event/outcome"""
+        """Test correctly construct and infer S3Path for an event/state"""
         event = GranuleProcessingEvent(
             granule_id=str(granule_id),
             attempt=1,
         )
 
-        path = service._path_for_event_outcome(event, outcome)
-        test_event, test_outcome = service._path_to_event_outcome(path)
+        path = service._path_for_event_state(event, state)
+        test_event, test_state = service._path_to_event_state(path)
         assert test_event == event
-        assert test_outcome == outcome
+        assert test_state == state
 
     def test_log_new_granule(
         self,
@@ -53,29 +53,30 @@ class TestGranuleLoggerService:
         granule_id: GranuleId,
     ) -> None:
         event = GranuleProcessingEvent(granule_id=str(granule_id), attempt=0)
-        service.put_event(event, ProcessingOutcome.AWAITING)
+        service.put_event(event, ProcessingState.AWAITING)
         list_events = service.list_events(granule_id)
         details = service.get_event_details(event)
         assert details is None
-        assert ProcessingOutcome.AWAITING in list_events
+        assert ProcessingState.AWAITING in list_events
 
-        service.put_event(event, ProcessingOutcome.SUBMITTED)
+        service.put_event(event, ProcessingState.SUBMITTED)
         list_events = service.list_events(granule_id)
-        assert ProcessingOutcome.AWAITING not in list_events
-        assert ProcessingOutcome.SUBMITTED in list_events
+        assert ProcessingState.AWAITING not in list_events
+        assert ProcessingState.SUBMITTED in list_events
 
     def test_full_lifecycle(
         self,
         service: GranuleLoggerService,
         granule_id: GranuleId,
         job_detail_failed_spot: JobDetailTypeDef,
+        job_detail_failed_error: JobDetailTypeDef,
     ) -> None:
         event = GranuleProcessingEvent(granule_id=str(granule_id), attempt=0)
-        service.put_event(event, ProcessingOutcome.AWAITING)
-        service.put_event(event, ProcessingOutcome.SUBMITTED)
+        service.put_event(event, ProcessingState.AWAITING)
+        service.put_event(event, ProcessingState.SUBMITTED)
 
         list_events = service.list_events(granule_id)
-        assert ProcessingOutcome.AWAITING not in list_events
+        assert ProcessingState.AWAITING not in list_events
 
         batch_details = job_detail_failed_spot.copy()
         fail_event = GranuleProcessingEvent(str(granule_id), 0)
@@ -86,19 +87,41 @@ class TestGranuleLoggerService:
         service.put_event_details(details)
 
         list_events = service.list_events(granule_id)
-        assert ProcessingOutcome.SUBMITTED not in list_events
-        assert ProcessingOutcome.FAILURE in list_events
+        assert ProcessingState.SUBMITTED not in list_events
+        assert ProcessingState.FAILURE_RETRYABLE in list_events
 
         batch_details = job_detail_failed_spot.copy()
-        succes_event = fail_event.new_attempt()
-        batch_details["container"]["environment"] = succes_event.to_environment()
+        success_event = fail_event.new_attempt()
+        batch_details["container"]["environment"] = success_event.to_environment()
         batch_details["container"]["exitCode"] = 0
         details = JobDetails(batch_details)
 
         service.put_event_details(details)
         list_events = service.list_events(granule_id)
-        assert ProcessingOutcome.FAILURE not in list_events
-        assert ProcessingOutcome.SUCCESS in list_events
+        assert ProcessingState.FAILURE_RETRYABLE not in list_events
+        assert ProcessingState.SUBMITTED not in list_events
+        assert ProcessingState.SUCCESS in list_events
+
+        # Test success on first job attempt
+        event = GranuleProcessingEvent(granule_id=str(granule_id), attempt=0)
+        service.put_event(event, ProcessingState.AWAITING)
+        service.put_event(event, ProcessingState.SUBMITTED)
+
+        list_events = service.list_events(granule_id)
+        assert ProcessingState.AWAITING not in list_events
+
+        batch_details = job_detail_failed_error.copy()
+        batch_details["container"]["environment"] = event.to_environment()
+        batch_details["container"]["exitCode"] = 0
+        details = JobDetails(batch_details)
+
+        service.put_event_details(details)
+
+        list_events = service.list_events(granule_id)
+        assert ProcessingState.SUBMITTED not in list_events
+        assert ProcessingState.SUCCESS in list_events
+        granule_log = service.get_event_log(list_events[ProcessingState.SUCCESS][0])
+        assert granule_log.state == ProcessingState.SUCCESS  # type: ignore
 
     def test_log_failure_and_success(
         self,
@@ -131,8 +154,10 @@ class TestGranuleLoggerService:
 
         # Two failures should exist
         list_events = service.list_events(granule_id)
-        assert set(list_events[ProcessingOutcome.FAILURE]) == {
+        assert set(list_events[ProcessingState.FAILURE_RETRYABLE]) == {
             first_event,
+        }
+        assert set(list_events[ProcessingState.FAILURE_NONRETRYABLE]) == {
             second_event,
         }
 
@@ -149,8 +174,8 @@ class TestGranuleLoggerService:
 
         # All logs have been moved to "success" since the job is done
         list_events = service.list_events(granule_id)
-        assert ProcessingOutcome.FAILURE not in list_events
-        assert set(list_events[ProcessingOutcome.SUCCESS]) == {
+        assert ProcessingState.FAILURE_RETRYABLE not in list_events
+        assert set(list_events[ProcessingState.SUCCESS]) == {
             first_event,
             second_event,
             third_event,

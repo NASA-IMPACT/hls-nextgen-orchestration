@@ -3,7 +3,7 @@ from .granule_logger import (
     GranuleEventLog,
     GranuleLoggerService,
 )
-from .models import GranuleId, GranuleProcessingEvent, JobOutcome, ProcessingOutcome
+from .models import GranuleId, GranuleProcessingEvent, ProcessingState
 
 __all__ = [
     "AwsBatchClient",
@@ -11,8 +11,7 @@ __all__ = [
     "GranuleProcessingEvent",
     "JobChangeEvent",
     "JobDetails",
-    "JobOutcome",
     "GranuleEventLog",
     "GranuleLoggerService",
-    "ProcessingOutcome",
+    "ProcessingState",
 ]

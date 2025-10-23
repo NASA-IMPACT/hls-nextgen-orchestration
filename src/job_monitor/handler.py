@@ -23,7 +23,7 @@ import boto3
 from common import (
     JobChangeEvent,
     JobDetails,
-    JobOutcome,
+    ProcessingState,
 )
 from common.granule_logger import GranuleLoggerService
 
@@ -73,8 +73,8 @@ def job_monitor(
     details = JobDetails(job_change_event["detail"])
 
     granule_event = details.get_granule_event()
-    outcome = details.get_job_outcome()
-    logger.info(f"AWS Batch job id={details.job_id} was {outcome}")
+    state = details.get_job_state()
+    logger.info(f"AWS Batch job id={details.job_id} was {state}")
 
     granule_logger = GranuleLoggerService(
         bucket=logs_bucket,
@@ -82,7 +82,7 @@ def job_monitor(
     )
     granule_logger.put_event_details(details)
 
-    if outcome == JobOutcome.FAILURE_RETRYABLE:
+    if state == ProcessingState.FAILURE_RETRYABLE:
         if details.job_attempts == details.max_attempts:
             sqs.send_message(
                 QueueUrl=retry_queue_url,
@@ -99,7 +99,7 @@ def job_monitor(
                 f"Ignoring retryable failure on attempt={details.job_attempts} which "
                 f"will be retried for a maximum of {details.max_attempts} attempts. "
             )
-    elif outcome == JobOutcome.FAILURE_NONRETRYABLE:
+    elif state == ProcessingState.FAILURE_NONRETRYABLE:
         sqs.send_message(
             QueueUrl=failure_dlq_url,
             MessageBody=granule_event.to_json(),

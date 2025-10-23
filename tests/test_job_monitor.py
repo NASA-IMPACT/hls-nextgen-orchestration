@@ -4,7 +4,7 @@ import pytest
 from mypy_boto3_batch.type_defs import JobDetailTypeDef
 from mypy_boto3_sqs import SQSClient
 
-from common import GranuleId, JobOutcome, ProcessingOutcome
+from common import GranuleId, ProcessingState
 from common.aws_batch import JobChangeEvent, JobDetails
 from common.granule_logger import GranuleLoggerService
 from job_monitor.handler import job_monitor
@@ -27,7 +27,8 @@ def test_handler_logs_nonretryable_failure(
     event = event_job_detail_change_failed.copy()
     event["detail"]["container"]["exitCode"] = 1
     assert (
-        JobDetails(event["detail"]).get_job_outcome() == JobOutcome.FAILURE_NONRETRYABLE
+        JobDetails(event["detail"]).get_job_state()
+        == ProcessingState.FAILURE_NONRETRYABLE
     )
 
     job_monitor(
@@ -42,9 +43,9 @@ def test_handler_logs_nonretryable_failure(
     assert len(messages) == 1
 
     events = job_logger.list_events(granule_id)
-    assert len(events[ProcessingOutcome.FAILURE]) == 1
-    assert events[ProcessingOutcome.FAILURE][0].attempt == 0
-    assert ProcessingOutcome.SUCCESS not in events
+    assert len(events[ProcessingState.FAILURE_NONRETRYABLE]) == 1
+    assert events[ProcessingState.FAILURE_NONRETRYABLE][0].attempt == 0
+    assert ProcessingState.SUCCESS not in events
 
 
 def test_handler_retryable_failure_last_attempt(
@@ -77,9 +78,9 @@ def test_handler_retryable_failure_last_attempt(
     assert len(messages) == 1
 
     events = job_logger.list_events(granule_id)
-    assert len(events[ProcessingOutcome.FAILURE]) == 1
-    assert events[ProcessingOutcome.FAILURE][0].attempt == 0
-    assert ProcessingOutcome.SUCCESS not in events
+    assert len(events[ProcessingState.FAILURE_RETRYABLE]) == 1
+    assert events[ProcessingState.FAILURE_RETRYABLE][0].attempt == 0
+    assert ProcessingState.SUCCESS not in events
 
 
 def test_handler_retryable_failure_doesnt_requeue_nonfinal_attempt(
@@ -112,8 +113,8 @@ def test_handler_retryable_failure_doesnt_requeue_nonfinal_attempt(
     assert len(messages) == 0
 
     events = job_logger.list_events(granule_id)
-    assert len(events[ProcessingOutcome.FAILURE]) == 1
-    assert ProcessingOutcome.SUCCESS not in events
+    assert len(events[ProcessingState.FAILURE_RETRYABLE]) == 1
+    assert ProcessingState.SUCCESS not in events
 
 
 def test_handler_logs_success(
@@ -136,6 +137,6 @@ def test_handler_logs_success(
     )
 
     events = job_logger.list_events(granule_id)
-    assert len(events[ProcessingOutcome.SUCCESS]) == 1
-    assert events[ProcessingOutcome.SUCCESS][0].attempt == 0
-    assert ProcessingOutcome.FAILURE not in events
+    assert len(events[ProcessingState.SUCCESS]) == 1
+    assert events[ProcessingState.SUCCESS][0].attempt == 0
+    assert ProcessingState.FAILURE_RETRYABLE not in events

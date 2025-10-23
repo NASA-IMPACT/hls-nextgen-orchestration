@@ -3,6 +3,7 @@ import pytest
 from common.models import (
     GranuleId,
     GranuleProcessingEvent,
+    ProcessingState,
 )
 
 # def test_job_outcome_covers_processing_outcome() -> None:
@@ -10,6 +11,26 @@ from common.models import (
 # processing_outcomes = set(ProcessingOutcome)
 # job_processing_outcomes = {outcome.processing_outcome for outcome in JobOutcome}
 # assert processing_outcomes == job_processing_outcomes
+
+
+class TestProcessingState:
+    """Sanity checks for enum properties"""
+
+    def test_previous_states(self) -> None:
+        """Ensure enum has exhaustive match for previous states"""
+        for state in list(ProcessingState):
+            previous_states = state.previous_states()
+            assert isinstance(previous_states, tuple)
+            assert all(
+                isinstance(previous_state, ProcessingState)
+                for previous_state in previous_states
+            )
+
+    def test_migrate_logs_to_state(self) -> None:
+        """Ensure enum has exhaustive match for previous states"""
+        for state in list(ProcessingState):
+            migrate_state = state.migrate_logs_to_state()
+            assert migrate_state is None or isinstance(migrate_state, ProcessingState)
 
 
 class TestGranuleId:

@@ -47,7 +47,7 @@ packages = ["src/common", "src/job_monitor", "src/job_requeuer"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py38"
+target-version = "py311"
 exclude = ["cdk.out", ".venv", "node_modules"]
 
 [tool.ruff.lint]
@@ -79,7 +79,7 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
-explicit_package_bases = true
+explicit_package_bases = false
 files = ["cdk", "src", "tests"]
 mypy_path = ["cdk", "src"]
 plugins = ["pydantic.mypy"]

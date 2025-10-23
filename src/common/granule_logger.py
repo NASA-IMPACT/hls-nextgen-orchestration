@@ -224,8 +224,8 @@ class GranuleLoggerService:
         for previous_state in job_state.previous_states():
             self._clean_previous_states(event.granule_id, previous_state)
 
-    def get_event_details(self, event: GranuleProcessingEvent) -> JobDetails | None:
-        """Get event details for an event
+    def get_event_log(self, event: GranuleProcessingEvent) -> GranuleEventLog | None:
+        """Get details for an event
 
         Raises
         ------
@@ -240,13 +240,23 @@ class GranuleLoggerService:
                 if e.response["Error"]["Code"] != "NoSuchKey":
                     raise
             else:
-                event_log = GranuleEventLog.from_json(data)
-                if event_log.job_info:
-                    return JobDetails(event_log.job_info)
-                else:
-                    return None
+                return GranuleEventLog.from_json(data)
 
         raise NoSuchEventAttemptExists(f"Cannot find logs for {event}")
+
+    def get_event_details(self, event: GranuleProcessingEvent) -> JobDetails | None:
+        """Get event details for an event
+
+        Raises
+        ------
+        NoSuchEventAttemptExists
+            Raised if the event provided doesn't exist in the logs
+        """
+        event_log = self.get_event_log(event)
+        if event_log and event_log.job_info:
+            return JobDetails(event_log.job_info)
+        else:
+            return None
 
     def list_events(
         self, granule_id: str | GranuleId, state: ProcessingState | None = None

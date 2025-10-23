@@ -120,6 +120,8 @@ class TestGranuleLoggerService:
         list_events = service.list_events(granule_id)
         assert ProcessingState.SUBMITTED not in list_events
         assert ProcessingState.SUCCESS in list_events
+        granule_log = service.get_event_log(list_events[ProcessingState.SUCCESS][0])
+        assert granule_log.state == ProcessingState.SUCCESS  # type: ignore
 
     def test_log_failure_and_success(
         self,

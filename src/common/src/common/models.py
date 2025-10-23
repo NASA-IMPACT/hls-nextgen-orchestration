@@ -40,11 +40,13 @@ class ProcessingState(Enum):
 
     def migrate_logs_to_state(self) -> ProcessingState | None:
         """Whether to copy logs for this state to another state"""
-        match self:
-            case (
-                ProcessingState.FAILURE_NONRETRYABLE | ProcessingState.FAILURE_RETRYABLE
-            ):
-                return ProcessingState.SUCCESS
+        if (
+            self == ProcessingState.FAILURE_NONRETRYABLE
+            or self == ProcessingState.FAILURE_RETRYABLE
+        ):
+            return ProcessingState.SUCCESS
+        else:
+            return None
 
 
 class ProcessingStep(Enum):

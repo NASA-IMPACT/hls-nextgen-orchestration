@@ -47,7 +47,7 @@ packages = ["src/common", "src/job_monitor", "src/job_requeuer"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py38"
+target-version = "py311"
 exclude = ["cdk.out", ".venv", "node_modules"]
 
 [tool.ruff.lint]

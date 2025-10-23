@@ -8,3 +8,7 @@ dependencies = [
     "boto_session_manager",
     "s3pathlib",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

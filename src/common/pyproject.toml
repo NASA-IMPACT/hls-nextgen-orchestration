@@ -4,7 +4,20 @@ version = "0.1.0"
 description = "Common modules for lambdas"
 requires-python = ">=3.11"
 dependencies = [
-    "boto3-stubs[batch,s3,sqs]>=1.37.36",
+    "aws-lambda-powertools>=3.3.0",
+    "aws-xray-sdk",
     "boto_session_manager",
     "s3pathlib",
 ]
+
+[dependency-groups]
+dev = [
+    "boto3-stubs[batch,s3,sqs]>=1.37.36",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

@@ -15,11 +15,11 @@ from aws_cdk import (
     aws_lambda as lambda_,
     aws_lambda_python_alpha as lambda_python,
     aws_s3 as s3,
-    aws_s3_notifications as s3_notifications,
+    # aws_s3_notifications as s3_notifications,
     aws_sqs as sqs,
 )
 from constructs import Construct
-from hls_constructs import AthenaLogsDatabase, BatchInfra, BatchJob
+from hls_constructs import BatchInfra, BatchJob
 from settings import StackSettings
 
 LAMBDA_EXCLUDE = [
@@ -89,20 +89,21 @@ class UvHooks:
 
 
 class HlsStack(Stack):
-    """HLS-VI historical processing CDK stack."""
+    """HLS processing CDK stack."""
 
     def __init__(
         self, scope: Construct, stack_id: str, *, settings: StackSettings, **kwargs: Any
     ) -> None:
         super().__init__(scope, stack_id, **kwargs)
 
-        # Apply IAM permission boundary to entire stack
-        boundary = iam.ManagedPolicy.from_managed_policy_arn(
-            self,
-            "PermissionBoundary",
-            settings.MCP_IAM_PERMISSION_BOUNDARY_ARN,
-        )
-        iam.PermissionsBoundary.of(self).apply(boundary)
+        if settings.MCP_IAM_PERMISSION_BOUNDARY_ARN:
+            # Apply IAM permission boundary to entire stack
+            boundary = iam.ManagedPolicy.from_managed_policy_arn(
+                self,
+                "PermissionBoundary",
+                settings.MCP_IAM_PERMISSION_BOUNDARY_ARN,
+            )
+            iam.PermissionsBoundary.of(self).apply(boundary)
 
         # ----------------------------------------------------------------------
         # Networking
@@ -127,7 +128,6 @@ class HlsStack(Stack):
             "OutputBucket",
             bucket_name=settings.OUTPUT_BUCKET_NAME,
         )
-
         self.processing_bucket = s3.Bucket(
             self,
             "ProcessingBucket",
@@ -220,26 +220,6 @@ class HlsStack(Stack):
             )
         )
 
-        logs_s3_inventory_location_s3path = "/".join(
-            [
-                f"s3://{settings.PROCESSING_BUCKET_NAME}",
-                settings.PROCESSING_BUCKET_LOGS_INVENTORY_PREFIX.rstrip("/"),
-                settings.PROCESSING_BUCKET_NAME,
-                inventory_id,
-                "hive",
-            ]
-        )
-
-        self.athena_logs_database = AthenaLogsDatabase(
-            self,
-            "AthenaLogsDatabase",
-            database_name=settings.ATHENA_LOGS_DATABASE_NAME,
-            table_datetime_start=settings.ATHENA_LOGS_S3_INVENTORY_TABLE_START_DATETIME,
-            logs_s3_inventory_location_s3path=logs_s3_inventory_location_s3path,
-            logs_s3_inventory_table_name=settings.ATHENA_LOGS_S3_INVENTORY_TABLE_NAME,
-            granule_processing_events_view_name=settings.ATHENA_LOGS_GRANULE_PROCESSING_EVENTS_VIEW_NAME,
-        )
-
         # ----------------------------------------------------------------------
         # AWS Batch infrastructure
         # ----------------------------------------------------------------------
@@ -272,6 +252,7 @@ class HlsStack(Stack):
             secrets=secrets,
             stage=settings.STAGE,
         )
+
         self.processing_bucket.grant_read_write(self.processing_job.role)
         self.output_bucket.grant_read_write(self.processing_job.role)
         if self.debug_bucket is not None:
@@ -332,9 +313,6 @@ class HlsStack(Stack):
             ),
         )
 
-        self.processing_bucket.grant_read_write(
-            self.job_monitor_lambda,
-        )
         self.job_retry_queue.grant_send_messages(self.job_monitor_lambda)
         self.job_failure_dlq.grant_send_messages(self.job_monitor_lambda)
 
@@ -393,9 +371,6 @@ class HlsStack(Stack):
             ),
         )
 
-        self.processing_bucket.grant_read_write(
-            self.job_requeuer_lambda, objects_key_pattern="logs/*"
-        )
         self.batch_sumbit_job_policy = iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             resources=[
@@ -418,15 +393,33 @@ class HlsStack(Stack):
             event_source_arn=self.job_retry_queue.queue_arn,
         )
 
-        self.granule_queuer_lambda = lambda_python.PythonFunction(
+        # First entry queue for new Sentinel granules.
+        self.granule_entry_queue = sqs.Queue(
             self,
-            "GranuleQueuerLambda",
+            "GranuleEntryQueue",
+            retention_period=Duration.days(14),
+            visibility_timeout=Duration.minutes(10),
+        )
+        self.powertools_layer = lambda_.LayerVersion.from_layer_version_arn(
+            self,
+            "PowertoolsLayer",
+            layer_version_arn=f"arn:aws:lambda:{self.region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-x86_64:18",
+        )
+
+        self.granule_entry_lambda = lambda_python.PythonFunction(
+            self,
+            "GranuleEntryLambda",
             entry="src/",
-            index="granule_queuer/handler.py",
+            index="granule_entry/handler.py",
             handler="handler",
             runtime=lambda_.Runtime.PYTHON_3_12,
             memory_size=512,
             timeout=Duration.minutes(10),
+            environment={
+                "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
+                "PROCESSING_BUCKET_LOG_PREFIX": settings.PROCESSING_BUCKET_LOG_PREFIX,
+            },
+            layers=[self.powertools_layer],
             bundling=lambda_python.BundlingOptions(
                 command_hooks=UvHooks(),
                 asset_excludes=LAMBDA_EXCLUDE,
@@ -434,10 +427,14 @@ class HlsStack(Stack):
             ),
         )
 
-        self.sentinel_bucket.grant_read(self.granule_queuer_lambda)
+        self.granule_entry_queue.grant_consume_messages(self.granule_entry_lambda)
+        self.processing_bucket.grant_read_write(self.granule_entry_lambda)
 
-        self.sentinel_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3_notifications.LambdaDestination(self.granule_queuer_lambda),
+        # Granule queuer consumes from the granule queue
+        self.granule_entry_lambda.add_event_source_mapping(
+            "GranuleQueuerQueueTrigger",
+            batch_size=100,
+            max_batching_window=Duration.minutes(1),
+            report_batch_item_failures=True,
+            event_source_arn=self.granule_entry_queue.queue_arn,
         )
-        self.granule_queuer_lambda.add_to_role_policy(self.batch_sumbit_job_policy)

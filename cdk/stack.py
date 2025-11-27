@@ -1,9 +1,6 @@
-import os
 from typing import Any, Dict
 
-import jsii
 from aws_cdk import (
-    DockerVolume,
     Duration,
     RemovalPolicy,
     Stack,
@@ -38,54 +35,6 @@ LAMBDA_EXCLUDE = [
     "tests",
     "scripts",
 ]
-
-# Mount root level `pyproject.toml` and `uv.lock` into container
-UV_ASSET_REQUIREMENTS = "/asset-requirements"
-UV_DOCKER_VOLUMES = [
-    DockerVolume(
-        host_path=os.path.abspath(file),
-        container_path=f"{UV_ASSET_REQUIREMENTS}/{file}",
-    )
-    for file in (
-        "pyproject.toml",
-        "uv.lock",
-    )
-]
-
-
-@jsii.implements(lambda_python.ICommandHooks)
-class UvHooks:
-    """Build hooks to setup UV and export a requirements.txt for building
-
-    This will be unnecessary after UV support is built-in in aws-lambda-python-alpha,
-    https://github.com/aws/aws-cdk/issues/31238
-    """
-
-    def __init__(self, groups: list[str] | None = None):
-        super().__init__()
-        self.groups = groups
-
-    def after_bundling(self, input_dir: str, output_dir: str) -> list[str]:
-        return []
-
-    def before_bundling(self, input_dir: str, output_dir: str) -> list[str]:
-        if self.groups:
-            groups_arg = " ".join([f"--group {group}" for group in self.groups])
-        else:
-            groups_arg = " "
-
-        return [
-            f"python -m venv {input_dir}/uv_venv",
-            f". {input_dir}/uv_venv/bin/activate",
-            "pip install uv",
-            "export UV_CACHE_DIR=/tmp",
-            f"cd {UV_ASSET_REQUIREMENTS}",
-            (
-                f"uv export {groups_arg} --frozen --no-emit-project --no-dev "
-                f"--no-default-groups --no-editable -o {input_dir}/requirements.txt"
-            ),
-            f"rm -rf {input_dir}/uv_venv",
-        ]
 
 
 class HlsStack(Stack):
@@ -307,9 +256,7 @@ class HlsStack(Stack):
                 ),
             },
             bundling=lambda_python.BundlingOptions(
-                command_hooks=UvHooks(),
                 asset_excludes=LAMBDA_EXCLUDE,
-                volumes=UV_DOCKER_VOLUMES,
             ),
         )
 
@@ -365,9 +312,7 @@ class HlsStack(Stack):
                 **bucket_envvars,
             },
             bundling=lambda_python.BundlingOptions(
-                command_hooks=UvHooks(),
                 asset_excludes=LAMBDA_EXCLUDE,
-                volumes=UV_DOCKER_VOLUMES,
             ),
         )
 
@@ -421,9 +366,7 @@ class HlsStack(Stack):
             },
             layers=[self.powertools_layer],
             bundling=lambda_python.BundlingOptions(
-                command_hooks=UvHooks(),
                 asset_excludes=LAMBDA_EXCLUDE,
-                volumes=UV_DOCKER_VOLUMES,
             ),
         )
 

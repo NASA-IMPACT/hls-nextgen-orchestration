@@ -12,7 +12,9 @@ from aws_cdk import (
     aws_lambda as lambda_,
     aws_lambda_python_alpha as lambda_python,
     aws_s3 as s3,
-    # aws_s3_notifications as s3_notifications,
+    aws_s3_notifications as s3_notifications,
+    aws_sns as sns,
+    aws_sns_subscriptions as sns_subscriptions,
     aws_sqs as sqs,
 )
 from constructs import Construct
@@ -338,13 +340,27 @@ class HlsStack(Stack):
             event_source_arn=self.job_retry_queue.queue_arn,
         )
 
-        # First entry queue for new Sentinel granules.
+        self.sentinel_topic = sns.Topic(
+            self,
+            "SentinelTopic",
+        )
+
+        self.sentinel_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3_notifications.SnsDestination(self.sentinel_topic),
+        )
+
         self.granule_entry_queue = sqs.Queue(
             self,
             "GranuleEntryQueue",
             retention_period=Duration.days(14),
             visibility_timeout=Duration.minutes(10),
         )
+
+        self.sentinel_topic.add_subscription(
+            sns_subscriptions.SqsSubscription(self.granule_entry_queue)
+        )
+
         self.powertools_layer = lambda_.LayerVersion.from_layer_version_arn(
             self,
             "PowertoolsLayer",

@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Tests for `granule_entry` Lambda"""
 
 import json
@@ -10,7 +11,8 @@ from aws_lambda_powertools.utilities.typing import LambdaContext
 from common import GranuleId, ProcessingState
 from common.granule_logger import GranuleLoggerService
 from granule_entry.handler import (
-    extract_granule_id_from_s3_key,
+    convert_safe_id_to_hls_id,
+    extract_safe_id_from_s3_key,
     handler,
     parse_s3_sns_message,
     process_record,
@@ -50,7 +52,7 @@ def s3_event_notification() -> dict[str, Any]:
                         "arn": "arn:aws:s3:::test-bucket",
                     },
                     "object": {
-                        "key": "input/HLS.S30.T01GBH.2022226T214921.v2.0.zip",
+                        "key": "input/S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510.zip",
                         "size": 1024,
                     },
                 },
@@ -108,7 +110,9 @@ def sqs_event_multiple_granules(sns_message: dict[str, Any]) -> dict[str, Any]:
                 "eventName": "ObjectCreated:Put",
                 "s3": {
                     "bucket": {"name": "test-bucket"},
-                    "object": {"key": "input/HLS.S30.T01GBH.2022226T214921.v2.0.zip"},
+                    "object": {
+                        "key": "input/S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510.zip"
+                    },
                 },
             },
             {
@@ -117,7 +121,9 @@ def sqs_event_multiple_granules(sns_message: dict[str, Any]) -> dict[str, Any]:
                 "eventName": "ObjectCreated:Put",
                 "s3": {
                     "bucket": {"name": "test-bucket"},
-                    "object": {"key": "input/HLS.L30.T15SXA.2022227T115359.v2.0.zip"},
+                    "object": {
+                        "key": "input/S2A_MSIL1C_20230817T154921_N0509_R011_T19TYN_20230817T204510.zip"
+                    },
                 },
             },
         ]
@@ -146,11 +152,6 @@ def sqs_event_multiple_granules(sns_message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# ==============================================================================
-# Tests for parse_s3_sns_message
-# ==============================================================================
-
-
 def test_parse_s3_sns_message(sns_message: dict[str, Any]) -> None:
     """Test parsing S3 event from SNS message"""
     sqs_body = json.dumps(sns_message)
@@ -163,7 +164,7 @@ def test_parse_s3_sns_message(sns_message: dict[str, Any]) -> None:
     assert result[0]["s3"]["bucket"]["name"] == "test-bucket"
     assert (
         result[0]["s3"]["object"]["key"]
-        == "input/HLS.S30.T01GBH.2022226T214921.v2.0.zip"
+        == "input/S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510.zip"
     )
 
 
@@ -178,7 +179,9 @@ def test_parse_s3_sns_message_multiple_records(
             "eventSource": "aws:s3",
             "s3": {
                 "bucket": {"name": "test-bucket-2"},
-                "object": {"key": "input/HLS.L30.T15SXA.2022227T115359.v2.0.zip"},
+                "object": {
+                    "key": "input/S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510.zip"
+                },
             },
         }
     )
@@ -207,32 +210,28 @@ def test_parse_s3_sns_message_empty_records() -> None:
     assert result == []
 
 
-# ==============================================================================
-# Tests for extract_granule_id_from_s3_key
-# ==============================================================================
+def test_convert_safe_id_to_granule_id() -> None:
+    safe_id = "S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510"
+    result = convert_safe_id_to_hls_id(safe_id)
+    assert result == "HLS.S30.T18TYN.2023229T154921.v2.0"
 
 
-def test_extract_granule_id_from_s3_key() -> None:
+def test_extract_safe_id_from_s3_key() -> None:
     """Test extracting granule ID from S3 key"""
-    s3_key = "input/HLS.S30.T01GBH.2022226T214921.v2.0.zip"
+    s3_key = "input/S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510.zip"
 
-    result = extract_granule_id_from_s3_key(s3_key)
+    result = extract_safe_id_from_s3_key(s3_key)
 
-    assert result == "HLS.S30.T01GBH.2022226T214921.v2.0"
+    assert result == "S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510"
 
 
-def test_extract_granule_id_from_s3_key_nested_path() -> None:
+def test_extract_safe_id_from_s3_key_nested_path() -> None:
     """Test extracting granule ID from deeply nested S3 path"""
-    s3_key = "data/2022/08/14/HLS.L30.T15SXA.2022227T115359.v2.0.zip"
+    s3_key = "data/2023/08/17/S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510.zip"
 
-    result = extract_granule_id_from_s3_key(s3_key)
+    result = extract_safe_id_from_s3_key(s3_key)
 
-    assert result == "HLS.L30.T15SXA.2022227T115359.v2.0"
-
-
-# ==============================================================================
-# Tests for process_record
-# ==============================================================================
+    assert result == "S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510"
 
 
 def test_process_record(
@@ -250,7 +249,7 @@ def test_process_record(
     process_record(sqs_body)
 
     # Verify the event was logged
-    granule_id = GranuleId.from_str("HLS.S30.T01GBH.2022226T214921.v2.0")
+    granule_id = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
     events = granule_logger.list_events(granule_id)
 
     assert ProcessingState.AWAITING in events
@@ -272,13 +271,17 @@ def test_process_record_multiple_s3_events(
             {
                 "s3": {
                     "bucket": {"name": "test-bucket"},
-                    "object": {"key": "input/HLS.S30.T01GBH.2022226T214921.v2.0.zip"},
+                    "object": {
+                        "key": "input/S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510.zip"
+                    },
                 }
             },
             {
                 "s3": {
                     "bucket": {"name": "test-bucket"},
-                    "object": {"key": "input/HLS.L30.T15SXA.2022227T115359.v2.0.zip"},
+                    "object": {
+                        "key": "input/S2A_MSIL1C_20230817T154921_N0509_R011_T19TYN_20230817T204510.zip"
+                    },
                 }
             },
         ]
@@ -291,8 +294,8 @@ def test_process_record_multiple_s3_events(
     process_record(sqs_body)
 
     # Verify both granules were logged
-    granule_id_1 = GranuleId.from_str("HLS.S30.T01GBH.2022226T214921.v2.0")
-    granule_id_2 = GranuleId.from_str("HLS.L30.T15SXA.2022227T115359.v2.0")
+    granule_id_1 = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
+    granule_id_2 = GranuleId.from_str("HLS.S30.T19TYN.2023229T154921.v2.0")
 
     events_1 = granule_logger.list_events(granule_id_1)
     events_2 = granule_logger.list_events(granule_id_2)
@@ -301,11 +304,6 @@ def test_process_record_multiple_s3_events(
     assert ProcessingState.AWAITING in events_2
     assert len(events_1[ProcessingState.AWAITING]) == 1
     assert len(events_2[ProcessingState.AWAITING]) == 1
-
-
-# ==============================================================================
-# Tests for handler with Lambda Powertools
-# ==============================================================================
 
 
 def test_handler(
@@ -325,7 +323,7 @@ def test_handler(
     assert result is None
 
     # Verify the granule was logged
-    granule_id = GranuleId.from_str("HLS.S30.T01GBH.2022226T214921.v2.0")
+    granule_id = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
     events = granule_logger.list_events(granule_id)
 
     assert ProcessingState.AWAITING in events
@@ -347,8 +345,8 @@ def test_handler_with_multiple_s3_records(
     assert result is None
 
     # Verify both granules were logged (both S3 records in the single SNS message)
-    granule_id_1 = GranuleId.from_str("HLS.S30.T01GBH.2022226T214921.v2.0")
-    granule_id_2 = GranuleId.from_str("HLS.L30.T15SXA.2022227T115359.v2.0")
+    granule_id_1 = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
+    granule_id_2 = GranuleId.from_str("HLS.S30.T19TYN.2023229T154921.v2.0")
 
     events_1 = granule_logger.list_events(granule_id_1)
     events_2 = granule_logger.list_events(granule_id_2)
@@ -420,7 +418,7 @@ def test_handler_multiple_sqs_records(
     assert result is None
 
     # Verify only one granule was logged (from the first record)
-    granule_id = GranuleId.from_str("HLS.S30.T01GBH.2022226T214921.v2.0")
+    granule_id = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
     events = granule_logger.list_events(granule_id)
 
     assert ProcessingState.AWAITING in events

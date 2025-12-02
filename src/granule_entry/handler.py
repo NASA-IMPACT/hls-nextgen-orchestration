@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from aws_lambda_powertools import Logger, Metrics, Tracer
@@ -41,18 +42,49 @@ def parse_s3_sns_message(sqs_body: str) -> list[dict]:
 
 
 @tracer.capture_method
-def extract_granule_id_from_s3_key(s3_key: str) -> str:
-    """Extract granule ID from S3 object key.
+def extract_safe_id_from_s3_key(s3_key: str) -> str:
+    """Extract SAFE ID from S3 object key.
 
     Args:
         s3_key: The S3 object key
 
     Returns:
-        The granule ID extracted from the key
+        The safe ID extracted from the key
     """
     filename = os.path.basename(s3_key)
 
-    granule_id = os.path.splitext(filename)[0]
+    safe_id = os.path.splitext(filename)[0]
+
+    return safe_id
+
+
+@tracer.capture_method
+def convert_safe_id_to_hls_id(safe_id: str) -> str:
+    """Convert a SAFE id to an HLS granule id.
+
+    Args:
+        safe_id: A SAFE id
+
+    Returns:
+        The HLS granule id
+    """
+    safe_components = safe_id.split("_")
+
+    date_str = safe_components[2][:15]
+
+    year = date_str[0:4]
+    month = date_str[4:6]
+    day = date_str[6:8]
+    hms = date_str[8:15]
+
+    dt = datetime.strptime(f"{year}{month}{day}", "%Y%m%d")
+    day_of_year = f"{dt.timetuple().tm_yday:03d}"  # zero-padded
+
+    hlsversion = "v2.0"
+
+    tile = safe_components[5]
+
+    granule_id = f"HLS.S30.{tile}.{year}{day_of_year}{hms}.{hlsversion}"
 
     return granule_id
 
@@ -79,7 +111,8 @@ def process_record(sqs_body: str) -> None:
         bucket_name = s3_info["bucket"]["name"]
         object_key = s3_info["object"]["key"]
 
-        granule_id = extract_granule_id_from_s3_key(object_key)
+        safe_id = extract_safe_id_from_s3_key(object_key)
+        granule_id = convert_safe_id_to_hls_id(safe_id)
 
         granule_event = GranuleProcessingEvent(
             granule_id=granule_id,

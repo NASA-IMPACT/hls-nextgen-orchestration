@@ -36,6 +36,7 @@ class GranuleEventLog:
     """HLS processing job attempt details"""
 
     granule_id: str
+    source_granule_id: str
     attempt: int
     state: ProcessingState
     job_info: Optional[JobDetailTypeDef] = None
@@ -45,6 +46,7 @@ class GranuleEventLog:
         return json.dumps(
             {
                 "granule_id": self.granule_id,
+                "source_granule_id": self.source_granule_id,
                 "attempt": self.attempt,
                 "state": self.state.name,
                 "job_info": self.job_info,
@@ -59,6 +61,7 @@ class GranuleEventLog:
         state = ProcessingState[data["state"]]
         return cls(
             granule_id=data["granule_id"],
+            source_granule_id=data["source_granule_id"],
             attempt=data["attempt"],
             state=state,
             job_info=job_info,
@@ -69,7 +72,7 @@ class GranuleEventLog:
 class GranuleLoggerService:
     """Log granule processing details
 
-    The granule logger describes staates from "granule processing events"
+    The granule logger describes states from "granule processing events"
     by using S3 as a store for logs and state breadcrumbs. In order to
     predictably list or search for information about our granule processing
     system this organizes log information into a set of prefixes based on
@@ -119,6 +122,7 @@ class GranuleLoggerService:
                 r"platform=(?P<platform>\w+)",
                 r"acquisition_date=(?P<acquisition_date>[\d-]+)",
                 r"granule_id=(?P<granule_id>[\w\.]+)",
+                r"source_granule_id=(?P<source_granule_id>[\w\.]+)",
                 r"attempt=(?P<attempt>[0-9]+)\.json$",
             ]
         )
@@ -127,7 +131,10 @@ class GranuleLoggerService:
     attempt_log_regex: ClassVar[re.Pattern[str]] = re.compile(r"^attempt=[0-9]+\.json$")
 
     def _prefix_for_granule_id_state(
-        self, granule_id: GranuleId, state: ProcessingState
+        self,
+        granule_id: GranuleId,
+        source_granule_id: str,
+        state: ProcessingState,
     ) -> S3Path:
         """Return the S3 path for storing this granule's info"""
         date = granule_id.begin_datetime.strftime("%Y-%m-%d")
@@ -138,6 +145,7 @@ class GranuleLoggerService:
             f"platform={granule_id.platform}",
             f"acquisition_date={date}",
             f"granule_id={str(granule_id)}",
+            f"source_granule_id={str(source_granule_id)}",
         )
 
     def _path_for_event_state(
@@ -146,7 +154,11 @@ class GranuleLoggerService:
         state: ProcessingState,
     ) -> S3Path:
         granule_id = GranuleId.from_str(event.granule_id)
-        prefix = self._prefix_for_granule_id_state(granule_id, state)
+        prefix = self._prefix_for_granule_id_state(
+            granule_id=granule_id,
+            state=state,
+            source_granule_id=event.source_granule_id,
+        )
         return S3Path(prefix, f"attempt={event.attempt}.json")
 
     def _path_to_event_state(
@@ -165,11 +177,16 @@ class GranuleLoggerService:
             )
 
         granule_id = match.group("granule_id")
+        source_granule_id = match.group("source_granule_id")
         attempt = int(match.group("attempt"))
         state = self.prefix_to_state[match.group("state")]
 
         return (
-            GranuleProcessingEvent(granule_id, attempt),
+            GranuleProcessingEvent(
+                granule_id=granule_id,
+                attempt=attempt,
+                source_granule_id=source_granule_id,
+            ),
             state,
         )
 
@@ -177,20 +194,28 @@ class GranuleLoggerService:
         return bool(self.attempt_log_regex.match(path.basename))
 
     def _list_logs_for_state(
-        self, granule_id: str, state: ProcessingState
+        self, granule_id: str, source_granule_id: str, state: ProcessingState
     ) -> list[S3Path]:
         """Helper function to find logs for some state"""
         prefix = self._prefix_for_granule_id_state(
-            GranuleId.from_str(granule_id), state
+            granule_id=GranuleId.from_str(granule_id),
+            source_granule_id=source_granule_id,
+            state=state,
         )
         paths = []
         for path in prefix.iter_objects(bsm=self.bsm).filter(self._filter_attempt_log):
             paths.append(path)
         return paths
 
-    def _clean_previous_states(self, granule_id: str, state: ProcessingState) -> None:
+    def _clean_previous_states(
+        self, granule_id: str, source_granule_id: str, state: ProcessingState
+    ) -> None:
         """Cleanup previous states"""
-        for state_path in self._list_logs_for_state(granule_id, state):
+        for state_path in self._list_logs_for_state(
+            granule_id=granule_id,
+            source_granule_id=source_granule_id,
+            state=state,
+        ):
             event, state = self._path_to_event_state(state_path)
             if migration_state := state.migrate_logs_to_state():
                 success_path = self._path_for_event_state(event, migration_state)
@@ -199,15 +224,20 @@ class GranuleLoggerService:
 
     def put_event(self, event: GranuleProcessingEvent, state: ProcessingState) -> None:
         s3path = self._path_for_event_state(event=event, state=state)
+
         event_log = GranuleEventLog(
             granule_id=event.granule_id,
+            source_granule_id=event.source_granule_id,
             attempt=event.attempt,
             state=state,
         )
-
         s3path.write_text(event_log.to_json(), bsm=self.bsm)
         for previous_state in state.previous_states():
-            self._clean_previous_states(event.granule_id, previous_state)
+            self._clean_previous_states(
+                granule_id=event.granule_id,
+                source_granule_id=event.source_granule_id,
+                state=previous_state,
+            )
 
     def put_event_details(self, details: JobDetails) -> None:
         """Log event details"""
@@ -216,13 +246,18 @@ class GranuleLoggerService:
         s3path = self._path_for_event_state(event, job_state)
         event_log = GranuleEventLog(
             granule_id=event.granule_id,
+            source_granule_id=event.source_granule_id,
             attempt=event.attempt,
             state=job_state,
             job_info=details.get_job_info(),
         )
         s3path.write_text(event_log.to_json(), bsm=self.bsm)
         for previous_state in job_state.previous_states():
-            self._clean_previous_states(event.granule_id, previous_state)
+            self._clean_previous_states(
+                granule_id=event.granule_id,
+                source_granule_id=event.source_granule_id,
+                state=previous_state,
+            )
 
     def get_event_log(self, event: GranuleProcessingEvent) -> GranuleEventLog | None:
         """Get details for an event
@@ -259,7 +294,10 @@ class GranuleLoggerService:
             return None
 
     def list_events(
-        self, granule_id: str | GranuleId, state: ProcessingState | None = None
+        self,
+        granule_id: str | GranuleId,
+        source_granule_id: str,
+        state: ProcessingState | None = None,
     ) -> dict[ProcessingState, list[GranuleProcessingEvent]]:
         """List events by state"""
         if state:
@@ -269,7 +307,11 @@ class GranuleLoggerService:
 
         events = defaultdict(list)
         for state in states:
-            for path in self._list_logs_for_state(str(granule_id), state):
+            for path in self._list_logs_for_state(
+                granule_id=(str(granule_id)),
+                state=state,
+                source_granule_id=source_granule_id,
+            ):
                 event, state = self._path_to_event_state(path)
                 events[state].append(event)
 

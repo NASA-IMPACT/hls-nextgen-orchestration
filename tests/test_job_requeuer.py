@@ -10,6 +10,7 @@ from job_requeuer.handler import job_requeuer
 
 def test_requeuer_many(
     bucket: str,
+    source_granule_id: str,
     mocked_batch_client_submit_job: MagicMock,
 ) -> None:
     """Test resubmitting several jobs from SQS queue"""
@@ -24,7 +25,15 @@ def test_requeuer_many(
         output_bucket=bucket,
         event=SQSEvent(
             Records=[
-                {"body": json.dumps({"granule_id": granule_id, "attempt": attempt})}
+                {
+                    "body": json.dumps(
+                        {
+                            "granule_id": granule_id,
+                            "attempt": attempt,
+                            "source_granule_id": source_granule_id,
+                        }
+                    )
+                }
                 for granule_id, attempt in granule_attempts.items()
             ]
         ),

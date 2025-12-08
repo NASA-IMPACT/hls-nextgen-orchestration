@@ -57,6 +57,7 @@ class TestGranuleProcessingEvent:
     def test_to_from_envvar(self, debug_bucket: str | None) -> None:
         event = GranuleProcessingEvent(
             granule_id="foo",
+            source_granule_id="bar",
             attempt=42,
             debug_bucket=debug_bucket,
         )

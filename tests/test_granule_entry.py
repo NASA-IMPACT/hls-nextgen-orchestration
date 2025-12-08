@@ -237,6 +237,8 @@ def test_extract_safe_id_from_s3_key_nested_path() -> None:
 def test_process_record(
     bucket: str,
     granule_logger: GranuleLoggerService,
+    granule_id: GranuleId,
+    source_granule_id: str,
     sns_message: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -249,8 +251,10 @@ def test_process_record(
     process_record(sqs_body)
 
     # Verify the event was logged
-    granule_id = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
-    events = granule_logger.list_events(granule_id)
+    events = granule_logger.list_events(
+        granule_id=str(granule_id),
+        source_granule_id=source_granule_id,
+    )
 
     assert ProcessingState.AWAITING in events
     assert len(events[ProcessingState.AWAITING]) == 1
@@ -266,22 +270,21 @@ def test_process_record_multiple_s3_events(
     """Test processing SQS message with multiple S3 events"""
     monkeypatch.setenv("PROCESSING_BUCKET_NAME", bucket)
 
+    safe_id_1 = "S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510"
+    safe_id_2 = "S2A_MSIL1C_20230817T154921_N0509_R011_T19TYN_20230817T204510"
+
     s3_event_with_multiple = {
         "Records": [
             {
                 "s3": {
                     "bucket": {"name": "test-bucket"},
-                    "object": {
-                        "key": "input/S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510.zip"
-                    },
+                    "object": {"key": f"input/{safe_id_1}.zip"},
                 }
             },
             {
                 "s3": {
                     "bucket": {"name": "test-bucket"},
-                    "object": {
-                        "key": "input/S2A_MSIL1C_20230817T154921_N0509_R011_T19TYN_20230817T204510.zip"
-                    },
+                    "object": {"key": f"input/{safe_id_2}.zip"},
                 }
             },
         ]
@@ -297,8 +300,14 @@ def test_process_record_multiple_s3_events(
     granule_id_1 = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
     granule_id_2 = GranuleId.from_str("HLS.S30.T19TYN.2023229T154921.v2.0")
 
-    events_1 = granule_logger.list_events(granule_id_1)
-    events_2 = granule_logger.list_events(granule_id_2)
+    events_1 = granule_logger.list_events(
+        granule_id=granule_id_1,
+        source_granule_id=safe_id_1,
+    )
+    events_2 = granule_logger.list_events(
+        granule_id=granule_id_2,
+        source_granule_id=safe_id_2,
+    )
 
     assert ProcessingState.AWAITING in events_1
     assert ProcessingState.AWAITING in events_2
@@ -308,6 +317,8 @@ def test_process_record_multiple_s3_events(
 
 def test_handler(
     bucket: str,
+    granule_id: GranuleId,
+    source_granule_id: str,
     granule_logger: GranuleLoggerService,
     sqs_event: dict[str, Any],
     lambda_context: LambdaContext,
@@ -323,8 +334,10 @@ def test_handler(
     assert result is None
 
     # Verify the granule was logged
-    granule_id = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
-    events = granule_logger.list_events(granule_id)
+    events = granule_logger.list_events(
+        granule_id=str(granule_id),
+        source_granule_id=source_granule_id,
+    )
 
     assert ProcessingState.AWAITING in events
     assert len(events[ProcessingState.AWAITING]) == 1
@@ -344,12 +357,21 @@ def test_handler_with_multiple_s3_records(
 
     assert result is None
 
+    safe_id_1 = "S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510"
+    safe_id_2 = "S2A_MSIL1C_20230817T154921_N0509_R011_T19TYN_20230817T204510"
+
     # Verify both granules were logged (both S3 records in the single SNS message)
     granule_id_1 = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
     granule_id_2 = GranuleId.from_str("HLS.S30.T19TYN.2023229T154921.v2.0")
 
-    events_1 = granule_logger.list_events(granule_id_1)
-    events_2 = granule_logger.list_events(granule_id_2)
+    events_1 = granule_logger.list_events(
+        granule_id=str(granule_id_1),
+        source_granule_id=safe_id_1,
+    )
+    events_2 = granule_logger.list_events(
+        granule_id=str(granule_id_2),
+        source_granule_id=safe_id_2,
+    )
 
     assert ProcessingState.AWAITING in events_1
     assert ProcessingState.AWAITING in events_2
@@ -392,6 +414,8 @@ def test_handler_empty_event(
 def test_handler_multiple_sqs_records(
     bucket: str,
     granule_logger: GranuleLoggerService,
+    granule_id: GranuleId,
+    source_granule_id: str,
     sns_message: dict[str, Any],
     lambda_context: LambdaContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -418,8 +442,10 @@ def test_handler_multiple_sqs_records(
     assert result is None
 
     # Verify only one granule was logged (from the first record)
-    granule_id = GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
-    events = granule_logger.list_events(granule_id)
+    events = granule_logger.list_events(
+        granule_id=granule_id,
+        source_granule_id=source_granule_id,
+    )
 
     assert ProcessingState.AWAITING in events
     # Should only be one event logged (not two, even though there were two SQS records)

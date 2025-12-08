@@ -96,7 +96,7 @@ class JobDetails:
         env = {
             entry["name"]: entry["value"]
             for entry in self.detail["container"]["environment"]
-            if entry["name"] in {"GRANULE_ID", "ATTEMPT"}
+            if entry["name"] in {"GRANULE_ID", "SOURCE_GRANULE_ID", "ATTEMPT"}
         }
         return GranuleProcessingEvent.from_envvar(env)
 

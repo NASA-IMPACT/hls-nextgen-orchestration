@@ -39,7 +39,7 @@
     "executionRoleArn": "arn:aws:iam::611670965994:role/hls-vi-historical-orchest-HLSVIProcessingBatchConta-dNvNJCUjKaJ9",
     "volumes": [],
     "environment": [
-      { "name": "GRANULE_ID", "value": "HLS.S30.T01GBH.2022226T214921.v2.0" },
+      { "name": "GRANULE_ID", "value": "HLS.S30.T18TYN.2023229T154921.v2.0" },
       { "name": "ATTEMPT", "value": "0" }
     ],
     "mountPoints": [],

@@ -17,6 +17,7 @@ def job_logger(bucket: str) -> GranuleLoggerService:
 
 def test_handler_logs_nonretryable_failure(
     granule_id: GranuleId,
+    source_granule_id: str,
     job_logger: GranuleLoggerService,
     sqs: SQSClient,
     retry_queue: str,
@@ -42,7 +43,10 @@ def test_handler_logs_nonretryable_failure(
     messages = sqs.receive_message(QueueUrl=failure_dlq)["Messages"]
     assert len(messages) == 1
 
-    events = job_logger.list_events(granule_id)
+    events = job_logger.list_events(
+        granule_id=granule_id,
+        source_granule_id=source_granule_id,
+    )
     assert len(events[ProcessingState.FAILURE_NONRETRYABLE]) == 1
     assert events[ProcessingState.FAILURE_NONRETRYABLE][0].attempt == 0
     assert ProcessingState.SUCCESS not in events
@@ -50,6 +54,7 @@ def test_handler_logs_nonretryable_failure(
 
 def test_handler_retryable_failure_last_attempt(
     granule_id: GranuleId,
+    source_granule_id: str,
     job_logger: GranuleLoggerService,
     sqs: SQSClient,
     retry_queue: str,
@@ -77,7 +82,10 @@ def test_handler_retryable_failure_last_attempt(
     messages = sqs.receive_message(QueueUrl=retry_queue)["Messages"]
     assert len(messages) == 1
 
-    events = job_logger.list_events(granule_id)
+    events = job_logger.list_events(
+        granule_id=str(granule_id),
+        source_granule_id=source_granule_id,
+    )
     assert len(events[ProcessingState.FAILURE_RETRYABLE]) == 1
     assert events[ProcessingState.FAILURE_RETRYABLE][0].attempt == 0
     assert ProcessingState.SUCCESS not in events
@@ -85,6 +93,7 @@ def test_handler_retryable_failure_last_attempt(
 
 def test_handler_retryable_failure_doesnt_requeue_nonfinal_attempt(
     granule_id: GranuleId,
+    source_granule_id: str,
     job_logger: GranuleLoggerService,
     sqs: SQSClient,
     retry_queue: str,
@@ -112,13 +121,17 @@ def test_handler_retryable_failure_doesnt_requeue_nonfinal_attempt(
     messages = sqs.receive_message(QueueUrl=retry_queue).get("Messages", [])
     assert len(messages) == 0
 
-    events = job_logger.list_events(granule_id)
+    events = job_logger.list_events(
+        granule_id=granule_id,
+        source_granule_id=source_granule_id,
+    )
     assert len(events[ProcessingState.FAILURE_RETRYABLE]) == 1
     assert ProcessingState.SUCCESS not in events
 
 
 def test_handler_logs_success(
     granule_id: GranuleId,
+    source_granule_id: str,
     job_logger: GranuleLoggerService,
     sqs: SQSClient,
     retry_queue: str,
@@ -136,7 +149,10 @@ def test_handler_logs_success(
         failure_dlq_url=failure_dlq,
     )
 
-    events = job_logger.list_events(granule_id)
+    events = job_logger.list_events(
+        granule_id=granule_id,
+        source_granule_id=source_granule_id,
+    )
     assert len(events[ProcessingState.SUCCESS]) == 1
     assert events[ProcessingState.SUCCESS][0].attempt == 0
     assert ProcessingState.FAILURE_RETRYABLE not in events

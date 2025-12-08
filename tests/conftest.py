@@ -24,7 +24,12 @@ FIXTURES = Path(__file__).parent / "fixtures"
 @pytest.fixture
 def granule_id() -> GranuleId:
     """A valid, example granule ID"""
-    return GranuleId.from_str("HLS.S30.T01GBH.2022226T214921.v2.0")
+    return GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
+
+
+@pytest.fixture
+def source_granule_id() -> str:
+    return "S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510"
 
 
 @pytest.fixture

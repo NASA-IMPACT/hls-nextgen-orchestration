@@ -24,6 +24,41 @@ tracer = Tracer()
 metrics = Metrics()
 
 
+# @tracer.capture_method
+# def queue_feeder(
+# processing_bucket: str,
+# output_bucket: str,
+# job_queue: str,
+# job_definition_name: str,
+# max_active_jobs: int,
+# granule_submit_count: int,
+# debug: bool = False,
+# ) -> dict[str, Any]:
+# """Submit granule processing jobs to AWS Batch queue"""
+# batch = AwsBatchClient(queue=job_queue, job_definition=job_definition_name)
+
+# if not batch.active_jobs_below_threshold(max_active_jobs):
+# logger.info("Too many active jobs in AWS Batch cluster, exiting early")
+# return {}
+
+
+# for i, granule_id in enumerate(granule_ids, 1):
+# processing_event = GranuleProcessingEvent(granule_id=granule_id, attempt=0)
+# batch.submit_job(
+# event=processing_event,
+# output_bucket=output_bucket,
+# )
+# if i % 100 == 0:
+# logger.info(f"Submitted {i} granule processing events")
+
+# # Don't increment status when running in debug mode
+# if not debug:
+# tracker.update_tracking(updated_tracking)
+
+# logger.info(f"Completed submitting {i} granule processing events")
+# return updated_tracking.to_dict()
+
+
 @tracer.capture_method
 def parse_s3_sns_message(sqs_body: str) -> list[dict]:
     """Parse S3 event notification from SNS message wrapped in SQS.
@@ -116,6 +151,7 @@ def process_record(sqs_body: str) -> None:
 
         granule_event = GranuleProcessingEvent(
             granule_id=granule_id,
+            source_granule_id=safe_id,
             attempt=0,
         )
 

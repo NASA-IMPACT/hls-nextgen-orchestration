@@ -74,11 +74,27 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # Buckets
         # ----------------------------------------------------------------------
-        self.output_bucket = s3.Bucket.from_bucket_name(
+        # self.output_bucket = s3.Bucket.from_bucket_name(
+        # self,
+        # "FmaskOutputBucket",
+        # bucket_name=settings.FOUTPUT_BUCKET_NAME,
+        # )
+
+        self.fmask_bucket = s3.Bucket(
             self,
-            "OutputBucket",
-            bucket_name=settings.OUTPUT_BUCKET_NAME,
+            "FmaskBucket",
+            bucket_name=settings.FMASK_OUTPUT_BUCKET_NAME,
+            removal_policy=RemovalPolicy.DESTROY,
+            lifecycle_rules=[
+                s3.LifecycleRule(expired_object_delete_marker=True),
+                s3.LifecycleRule(
+                    abort_incomplete_multipart_upload_after=Duration.days(1),
+                    noncurrent_version_expiration=Duration.days(1),
+                ),
+            ],
+            encryption=s3.BucketEncryption.S3_MANAGED,
         )
+
         self.processing_bucket = s3.Bucket(
             self,
             "ProcessingBucket",
@@ -116,7 +132,7 @@ class HlsStack(Stack):
         )
 
         bucket_envvars = {
-            "OUTPUT_BUCKET": settings.OUTPUT_BUCKET_NAME,
+            "FMASK_OUTPUT_BUCKET_NAME": settings.FMASK_OUTPUT_BUCKET_NAME,
         }
 
         self.debug_bucket: s3.IBucket | None
@@ -185,29 +201,31 @@ class HlsStack(Stack):
         )
 
         # ----------------------------------------------------------------------
-        # HLS processing compute job
+        # HLS processing compute jobs
         # ----------------------------------------------------------------------
         secrets: Dict[str, batch.Secret] = {}
 
-        self.processing_job = BatchJob(
+        self.fmask_job = BatchJob(
             self,
             "HLS-Processing",
-            container_ecr_uri=settings.PROCESSING_CONTAINER_ECR_URI,
-            vcpu=settings.PROCESSING_JOB_VCPU,
-            memory_mb=settings.PROCESSING_JOB_MEMORY_MB,
+            container_ecr_uri=settings.FMASK_CONTAINER_ECR_URI,
+            vcpu=settings.FMASK_JOB_VCPU,
+            memory_mb=settings.FMASK_JOB_MEMORY_MB,
             retry_attempts=settings.PROCESSING_JOB_RETRY_ATTEMPTS,
             log_group_name=settings.PROCESSING_LOG_GROUP_NAME,
             environment={
                 "PYTHONUNBUFFERED": "TRUE",
+                "SENTINEL_BUCKET_NAME": self.sentinel_bucket.bucket_name,
+                "FMASK_OUTPUT_BUCKET_NAME": self.fmask_bucket.bucket_name,
             },
             secrets=secrets,
             stage=settings.STAGE,
         )
 
-        self.processing_bucket.grant_read_write(self.processing_job.role)
-        self.output_bucket.grant_read_write(self.processing_job.role)
+        self.fmask_bucket.grant_read_write(self.fmask_job.role)
+        self.sentinel_bucket.grant_read(self.fmask_job.role)
         if self.debug_bucket is not None:
-            self.debug_bucket.grant_read(self.processing_job.role)
+            self.debug_bucket.grant_read(self.fmask_job.role)
 
         # ----------------------------------------------------------------------
         # Job monitor & retry system
@@ -279,7 +297,7 @@ class HlsStack(Stack):
                     "jobDefinition": [
                         {
                             "wildcard": (
-                                f"*{self.processing_job.job_def.job_definition_name}*"
+                                f"*{self.fmask_job.job_def.job_definition_name}*"
                             )
                         },
                     ],
@@ -309,7 +327,7 @@ class HlsStack(Stack):
             environment={
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "BATCH_JOB_DEFINITION_NAME": (
-                    self.processing_job.job_def.job_definition_name
+                    self.fmask_job.job_def.job_definition_name
                 ),
                 **bucket_envvars,
             },
@@ -322,7 +340,7 @@ class HlsStack(Stack):
             effect=iam.Effect.ALLOW,
             resources=[
                 self.batch_infra.queue.job_queue_arn,
-                self.processing_job.job_def_arn_without_revision,
+                self.fmask_job.job_def_arn_without_revision,
             ],
             actions=[
                 "batch:SubmitJob",
@@ -379,6 +397,7 @@ class HlsStack(Stack):
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "PROCESSING_BUCKET_LOG_PREFIX": settings.PROCESSING_BUCKET_LOG_PREFIX,
+                "FMASK_OUTPUT_BUCKET_NAME": self.fmask_bucket.bucket_name,
             },
             layers=[self.powertools_layer],
             bundling=lambda_python.BundlingOptions(

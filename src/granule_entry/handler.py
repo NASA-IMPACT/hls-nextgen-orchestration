@@ -7,10 +7,13 @@ import os
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import boto3
 from aws_lambda_powertools import Logger, Metrics, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from common import (
+    AwsBatchClient,
+    GranuleId,
     GranuleProcessingEvent,
     ProcessingState,
 )
@@ -21,42 +24,41 @@ if TYPE_CHECKING:
 
 logger = Logger()
 tracer = Tracer()
-metrics = Metrics()
+metrics = Metrics(namespace="hls_granule_entry")
 
 
-# @tracer.capture_method
-# def queue_feeder(
-# processing_bucket: str,
-# output_bucket: str,
-# job_queue: str,
-# job_definition_name: str,
-# max_active_jobs: int,
-# granule_submit_count: int,
-# debug: bool = False,
-# ) -> dict[str, Any]:
-# """Submit granule processing jobs to AWS Batch queue"""
-# batch = AwsBatchClient(queue=job_queue, job_definition=job_definition_name)
+@tracer.capture_method
+def submit_job(
+    granule_id: str,
+    source_granule_id: str,
+    granule_logger: GranuleLoggerService,
+) -> None:
+    """Submit granule processing jobs to AWS Batch queue"""
+    output_bucket = os.environ["FMASK_OUTPUT_BUCKET_NAME"]
+    job_queue = os.environ["BATCH_QUEUE_NAME"]
+    job_definition_name = os.environ["FMASK_JOB_DEFINITION_NAME"]
+    max_active_jobs = int(os.environ["FEEDER_MAX_ACTIVE_JOBS"])
+    # debug_bucket = os.environ.get("DEBUG_BUCKET")
+    batch = AwsBatchClient(queue=job_queue, job_definition=job_definition_name)
 
-# if not batch.active_jobs_below_threshold(max_active_jobs):
-# logger.info("Too many active jobs in AWS Batch cluster, exiting early")
-# return {}
+    if not batch.active_jobs_below_threshold(max_active_jobs):
+        logger.info("Too many active jobs in AWS Batch cluster, exiting early")
+        return
 
-
-# for i, granule_id in enumerate(granule_ids, 1):
-# processing_event = GranuleProcessingEvent(granule_id=granule_id, attempt=0)
-# batch.submit_job(
-# event=processing_event,
-# output_bucket=output_bucket,
-# )
-# if i % 100 == 0:
-# logger.info(f"Submitted {i} granule processing events")
-
-# # Don't increment status when running in debug mode
-# if not debug:
-# tracker.update_tracking(updated_tracking)
-
-# logger.info(f"Completed submitting {i} granule processing events")
-# return updated_tracking.to_dict()
+    processing_event = GranuleProcessingEvent(
+        granule_id=granule_id,
+        attempt=0,
+        source_granule_id=source_granule_id,
+    )
+    batch.submit_job(
+        event=processing_event,
+        output_bucket=output_bucket,
+    )
+    granule_logger.put_event(
+        event=processing_event,
+        state=ProcessingState.SUBMITTED,
+    )
+    logger.info(f"Submitted granule {granule_id} for Fmask")
 
 
 @tracer.capture_method
@@ -125,6 +127,58 @@ def convert_safe_id_to_hls_id(safe_id: str) -> str:
 
 
 @tracer.capture_method
+def key_pattern_exists(bucket: str, pattern: str) -> bool:
+    """Check if any S3 keys exist that match the given pattern.
+
+    Args:
+        bucket: S3 bucket name
+        pattern: S3 key prefix pattern to search for
+
+    Returns:
+        bool: True if at least one matching key exists
+    """
+    s3_client = boto3.client("s3")
+
+    try:
+        response = s3_client.list_objects_v2(Bucket=bucket, Prefix=pattern, MaxKeys=1)
+        return bool(response.get("KeyCount", 0) > 0)
+    except Exception as e:
+        logger.error(
+            "Error checking S3 key pattern",
+            extra={"bucket": bucket, "pattern": pattern, "error": str(e)},
+        )
+        return False
+
+
+@tracer.capture_method
+def check_aux_data(granule_id: GranuleId) -> bool:
+    """Checks an S3 bucket to determine if auxiliary data exists for granule
+
+    Args:
+        granule_id: A granule id.
+
+    Returns:
+        bool: True if auxiliary data exists for the granule date
+    """
+    bucket = os.environ.get("AUX_DATA_BUCKET_NAME")
+    if not bucket:
+        logger.error("AUX_DATA_BUCKET_NAME environment variable not set")
+        return False
+
+    year = granule_id.begin_datetime.strftime("%Y")
+    ydoy = granule_id.begin_datetime.strftime("%Y%j")
+
+    vj_pattern = f"lasrc_aux/LADS/{year}/VJ104ANC.A{ydoy}"
+    vj_exists = key_pattern_exists(bucket, vj_pattern)
+
+    vnp_pattern = f"lasrc_aux/LADS/{year}/VNP04ANC.A{ydoy}"
+    vnp_exists = key_pattern_exists(bucket, vnp_pattern)
+
+    return bool(vj_exists or vnp_exists)
+
+
+@tracer.capture_method
+@tracer.capture_method
 def process_record(sqs_body: str) -> None:
     """Process a single SQS message body containing S3 event notifications.
 
@@ -147,28 +201,35 @@ def process_record(sqs_body: str) -> None:
         object_key = s3_info["object"]["key"]
 
         safe_id = extract_safe_id_from_s3_key(object_key)
-        granule_id = convert_safe_id_to_hls_id(safe_id)
+        granule_id_str = convert_safe_id_to_hls_id(safe_id)
+        granule_id = GranuleId.from_str(granule_id_str)
 
         granule_event = GranuleProcessingEvent(
-            granule_id=granule_id,
+            granule_id=granule_id_str,
             source_granule_id=safe_id,
             attempt=0,
         )
 
-        logger.info(
-            "Marking granule as AWAITING",
-            extra={
-                "granule_id": granule_event.granule_id,
-                "s3_bucket": bucket_name,
-                "s3_key": object_key,
-            },
-        )
-        granule_logger.put_event(
-            event=granule_event,
-            state=ProcessingState.AWAITING,
-        )
-
-        metrics.add_metric(name="GranulesProcessed", unit="Count", value=1)
+        aux_data = check_aux_data(granule_id)
+        if aux_data:
+            submit_job(
+                granule_id=granule_id_str,
+                source_granule_id=safe_id,
+                granule_logger=granule_logger,
+            )
+        else:
+            logger.info(
+                "Marking granule as AWAITING",
+                extra={
+                    "granule_id": granule_event.granule_id,
+                    "s3_bucket": bucket_name,
+                    "s3_key": object_key,
+                },
+            )
+            granule_logger.put_event(
+                event=granule_event,
+                state=ProcessingState.AWAITING,
+            )
 
 
 @logger.inject_lambda_context

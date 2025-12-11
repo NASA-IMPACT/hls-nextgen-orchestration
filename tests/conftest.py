@@ -85,6 +85,25 @@ def output_bucket(s3: S3Client, monkeypatch: pytest.MonkeyPatch) -> str:
     return "output"
 
 
+@pytest.fixture
+def aux_bucket(
+    s3: S3Client, granule_id: GranuleId, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """Create the aux bucket, returning bucket name and setting envar"""
+    s3.create_bucket(
+        Bucket="aux", CreateBucketConfiguration={"LocationConstraint": "us-west-2"}
+    )
+    name = "aux"
+    year = granule_id.begin_datetime.strftime("%Y")
+    ydoy = granule_id.begin_datetime.strftime("%Y%j")
+    s3.put_object(
+        Bucket=name,
+        Key=f"lasrc_aux/LADS/{year}/VJ104ANC.A{ydoy}",
+    )
+    monkeypatch.setenv("AUX_DATA_BUCKET_NAME", "aux")
+    return "aux"
+
+
 # ==============================================================================
 # SQS
 @pytest.fixture
@@ -191,5 +210,15 @@ def mocked_batch_client_submit_job() -> Iterator[MagicMock]:
         AwsBatchClient,
         "submit_job",
         return_value="foo-job-id",
+    ) as mock:
+        yield mock
+
+
+@pytest.fixture
+def mocked_active_jobs_below_threshold() -> Iterator[MagicMock]:
+    with patch.object(
+        AwsBatchClient,
+        "active_jobs_below_threshold",
+        return_value=True,
     ) as mock:
         yield mock

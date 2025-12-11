@@ -11,6 +11,7 @@ from aws_lambda_powertools.utilities.typing import LambdaContext
 from common import GranuleId, ProcessingState
 from common.granule_logger import GranuleLoggerService
 from granule_entry.handler import (
+    check_aux_data,
     convert_safe_id_to_hls_id,
     extract_safe_id_from_s3_key,
     handler,
@@ -328,10 +329,7 @@ def test_handler(
     monkeypatch.setenv("PROCESSING_BUCKET_NAME", bucket)
     monkeypatch.setenv("PROCESSING_BUCKET_LOG_PREFIX", "logs")
 
-    result = handler(sqs_event, lambda_context)
-
-    # Handler now returns None
-    assert result is None
+    handler(sqs_event, lambda_context)
 
     # Verify the granule was logged
     events = granule_logger.list_events(
@@ -341,6 +339,37 @@ def test_handler(
 
     assert ProcessingState.AWAITING in events
     assert len(events[ProcessingState.AWAITING]) == 1
+
+
+def test_handler_aux_exists(
+    bucket: str,
+    aux_bucket: str,
+    granule_id: GranuleId,
+    source_granule_id: str,
+    granule_logger: GranuleLoggerService,
+    sqs_event: dict[str, Any],
+    mocked_batch_client_submit_job: MagicMock,
+    mocked_active_jobs_below_threshold: MagicMock,
+    lambda_context: LambdaContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test the Lambda handler function with a single record with aux data"""
+    monkeypatch.setenv("FMASK_OUTPUT_BUCKET_NAME", "fmask_bucket")
+    monkeypatch.setenv("BATCH_QUEUE_NAME", "batch_queue")
+    monkeypatch.setenv("FMASK_JOB_DEFINITION_NAME", "fmask_job_definition")
+    monkeypatch.setenv("FEEDER_MAX_ACTIVE_JOBS", "4")
+    monkeypatch.setenv("PROCESSING_BUCKET_NAME", bucket)
+    monkeypatch.setenv("AUX_DATA_BUCKET_NAME", aux_bucket)
+    # monkeypatch.setenv("PROCESSING_BUCKET_LOG_PREFIX", "logs")
+
+    handler(sqs_event, lambda_context)
+
+    events = granule_logger.list_events(
+        granule_id=str(granule_id),
+        source_granule_id=source_granule_id,
+    )
+    assert ProcessingState.SUBMITTED in events
+    assert len(events[ProcessingState.SUBMITTED]) == 1
 
 
 def test_handler_with_multiple_s3_records(
@@ -353,9 +382,7 @@ def test_handler_with_multiple_s3_records(
     """Test handler processing multiple S3 records within a single SQS message"""
     monkeypatch.setenv("PROCESSING_BUCKET_NAME", bucket)
 
-    result = handler(sqs_event_multiple_granules, lambda_context)
-
-    assert result is None
+    handler(sqs_event_multiple_granules, lambda_context)
 
     safe_id_1 = "S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510"
     safe_id_2 = "S2A_MSIL1C_20230817T154921_N0509_R011_T19TYN_20230817T204510"
@@ -437,9 +464,7 @@ def test_handler_multiple_sqs_records(
         ]
     }
 
-    result = handler(multi_record_event, lambda_context)
-
-    assert result is None
+    handler(multi_record_event, lambda_context)
 
     # Verify only one granule was logged (from the first record)
     events = granule_logger.list_events(
@@ -450,3 +475,17 @@ def test_handler_multiple_sqs_records(
     assert ProcessingState.AWAITING in events
     # Should only be one event logged (not two, even though there were two SQS records)
     assert len(events[ProcessingState.AWAITING]) == 1
+
+
+def test_check_aux_data(
+    aux_bucket: str,
+    granule_id: GranuleId,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUX_DATA_BUCKET_NAME", aux_bucket)
+    result: bool = check_aux_data(granule_id)
+    assert result
+
+    granule_id_false = GranuleId.from_str("HLS.S30.T19TYN.2024229T154921.v2.0")
+    false_result: bool = check_aux_data(granule_id_false)
+    assert not false_result

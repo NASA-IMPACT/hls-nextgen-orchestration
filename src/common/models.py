@@ -95,6 +95,9 @@ class GranuleId:
             ]
         )
 
+    def doy(self) -> str:
+        return self.begin_datetime.strftime(HLS_GRANULE_ID_STRFTIME)
+
 
 @dataclass(frozen=True)
 class GranuleProcessingEvent:

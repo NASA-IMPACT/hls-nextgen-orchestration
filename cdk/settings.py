@@ -52,16 +52,16 @@ class StackSettings(BaseSettings):
     SENTINEL_BUCKET_NAME: str
 
     # Output bucket for HLS output files
-    OUTPUT_BUCKET_NAME: str
+    FMASK_OUTPUT_BUCKET_NAME: str
 
     # Debug bucket (optional, but useful for avoiding triggering LPDAAC ingest)
     DEBUG_BUCKET_NAME: str | None = None
 
     # ----- HLS processing
-    PROCESSING_CONTAINER_ECR_URI: str
+    FMASK_CONTAINER_ECR_URI: str
     # Job vCPU and memory limits
-    PROCESSING_JOB_VCPU: int = 1
-    PROCESSING_JOB_MEMORY_MB: int = 2_000
+    FMASK_JOB_VCPU: int = 1
+    FMASK_JOB_MEMORY_MB: int = 2_000
     # Custom log group (otherwise they'll land in the catch-all AWS Batch log group)
     PROCESSING_LOG_GROUP_NAME: str
     # Number of internal AWS Batch job retries
@@ -89,7 +89,7 @@ class StackSettings(BaseSettings):
     # ----- Job retry system
     # Send retryable failed AWS Batch jobs to this queue
     JOB_RETRY_QUEUE_NAME: str
-    # Failed AWS Batch jobs go to a DLQ that can redrive to the retry queue
+    # Failed AWS Batch jobs go to a DLQ that can redrive to the retry queueS
     JOB_FAILURE_DLQ_NAME: str
 
     # ----- Logs inventory Athena database

@@ -287,7 +287,9 @@ class HlsStack(Stack):
                 asset_excludes=LAMBDA_EXCLUDE,
             ),
         )
-
+        self.processing_bucket.grant_read_write(
+            self.job_monitor_lambda,
+        )
         self.job_retry_queue.grant_send_messages(self.job_monitor_lambda)
         self.job_failure_dlq.grant_send_messages(self.job_monitor_lambda)
 

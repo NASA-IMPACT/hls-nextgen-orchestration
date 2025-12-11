@@ -51,7 +51,9 @@ class StackSettings(BaseSettings):
 
     SENTINEL_BUCKET_NAME: str
 
-    # Output bucket for HLS output files
+    AUX_DATA_BUCKET_NAME: str
+
+    # Output bucket for FMASK output files
     FMASK_OUTPUT_BUCKET_NAME: str
 
     # Debug bucket (optional, but useful for avoiding triggering LPDAAC ingest)
@@ -85,6 +87,8 @@ class StackSettings(BaseSettings):
 
     # Cluster scaling max
     BATCH_MAX_VCPU: int = 10
+
+    MAX_ACTIVE_JOBS: int = 10_000
 
     # ----- Job retry system
     # Send retryable failed AWS Batch jobs to this queue

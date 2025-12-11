@@ -357,7 +357,7 @@ def test_handler_aux_exists(
     monkeypatch.setenv("FMASK_OUTPUT_BUCKET_NAME", "fmask_bucket")
     monkeypatch.setenv("BATCH_QUEUE_NAME", "batch_queue")
     monkeypatch.setenv("FMASK_JOB_DEFINITION_NAME", "fmask_job_definition")
-    monkeypatch.setenv("FEEDER_MAX_ACTIVE_JOBS", "4")
+    monkeypatch.setenv("MAX_ACTIVE_JOBS", "4")
     monkeypatch.setenv("PROCESSING_BUCKET_NAME", bucket)
     monkeypatch.setenv("AUX_DATA_BUCKET_NAME", aux_bucket)
     # monkeypatch.setenv("PROCESSING_BUCKET_LOG_PREFIX", "logs")

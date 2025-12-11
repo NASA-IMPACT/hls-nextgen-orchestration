@@ -77,8 +77,14 @@ class HlsStack(Stack):
         # self.output_bucket = s3.Bucket.from_bucket_name(
         # self,
         # "FmaskOutputBucket",
-        # bucket_name=settings.FOUTPUT_BUCKET_NAME,
+        # bucket_name=settings.OUTPUT_BUCKET_NAME,
         # )
+
+        self.aux_data_bucket = s3.Bucket.from_bucket_name(
+            self,
+            "AuxDataBucket",
+            bucket_name=settings.AUX_DATA_BUCKET_NAME,
+        )
 
         self.fmask_bucket = s3.Bucket(
             self,
@@ -207,7 +213,7 @@ class HlsStack(Stack):
 
         self.fmask_job = BatchJob(
             self,
-            "HLS-Processing",
+            "FmaskJob",
             container_ecr_uri=settings.FMASK_CONTAINER_ECR_URI,
             vcpu=settings.FMASK_JOB_VCPU,
             memory_mb=settings.FMASK_JOB_MEMORY_MB,
@@ -217,6 +223,7 @@ class HlsStack(Stack):
                 "PYTHONUNBUFFERED": "TRUE",
                 "SENTINEL_BUCKET_NAME": self.sentinel_bucket.bucket_name,
                 "FMASK_OUTPUT_BUCKET_NAME": self.fmask_bucket.bucket_name,
+                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
             },
             secrets=secrets,
             stage=settings.STAGE,
@@ -224,6 +231,7 @@ class HlsStack(Stack):
 
         self.fmask_bucket.grant_read_write(self.fmask_job.role)
         self.sentinel_bucket.grant_read(self.fmask_job.role)
+        self.aux_data_bucket.grant_read(self.fmask_job.role)
         if self.debug_bucket is not None:
             self.debug_bucket.grant_read(self.fmask_job.role)
 
@@ -398,6 +406,10 @@ class HlsStack(Stack):
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "PROCESSING_BUCKET_LOG_PREFIX": settings.PROCESSING_BUCKET_LOG_PREFIX,
                 "FMASK_OUTPUT_BUCKET_NAME": self.fmask_bucket.bucket_name,
+                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
+                "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
+                "MAX_ACTIVE_JOBS": str(settings.MAX_ACTIVE_JOBS),
+                "FMASK_JOB_DEFINITION_NAME": self.fmask_job.job_def.job_definition_name,
             },
             layers=[self.powertools_layer],
             bundling=lambda_python.BundlingOptions(
@@ -407,6 +419,29 @@ class HlsStack(Stack):
 
         self.granule_entry_queue.grant_consume_messages(self.granule_entry_lambda)
         self.processing_bucket.grant_read_write(self.granule_entry_lambda)
+        self.aux_data_bucket.grant_read_write(self.granule_entry_lambda)
+
+        self.granule_entry_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                resources=[
+                    self.batch_infra.queue.job_queue_arn,
+                    self.fmask_job.job_def_arn_without_revision,
+                ],
+                actions=[
+                    "batch:SubmitJob",
+                ],
+            )
+        )
+        self.granule_entry_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                resources=["*"],
+                actions=[
+                    "batch:ListJobs",
+                ],
+            )
+        )
 
         # Granule queuer consumes from the granule queue
         self.granule_entry_lambda.add_event_source_mapping(

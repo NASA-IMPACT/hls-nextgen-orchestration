@@ -37,7 +37,7 @@ def submit_job(
     output_bucket = os.environ["FMASK_OUTPUT_BUCKET_NAME"]
     job_queue = os.environ["BATCH_QUEUE_NAME"]
     job_definition_name = os.environ["FMASK_JOB_DEFINITION_NAME"]
-    max_active_jobs = int(os.environ["FEEDER_MAX_ACTIVE_JOBS"])
+    max_active_jobs = int(os.environ["MAX_ACTIVE_JOBS"])
     # debug_bucket = os.environ.get("DEBUG_BUCKET")
     batch = AwsBatchClient(queue=job_queue, job_definition=job_definition_name)
 

@@ -74,12 +74,6 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # Buckets
         # ----------------------------------------------------------------------
-        # self.output_bucket = s3.Bucket.from_bucket_name(
-        # self,
-        # "FmaskOutputBucket",
-        # bucket_name=settings.OUTPUT_BUCKET_NAME,
-        # )
-
         self.aux_data_bucket = s3.Bucket.from_bucket_name(
             self,
             "AuxDataBucket",
@@ -346,7 +340,7 @@ class HlsStack(Stack):
             ),
         )
 
-        self.batch_sumbit_job_policy = iam.PolicyStatement(
+        self.batch_submit_job_policy = iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             resources=[
                 self.batch_infra.queue.job_queue_arn,
@@ -356,7 +350,7 @@ class HlsStack(Stack):
                 "batch:SubmitJob",
             ],
         )
-        self.job_requeuer_lambda.add_to_role_policy(self.batch_sumbit_job_policy)
+        self.job_requeuer_lambda.add_to_role_policy(self.batch_submit_job_policy)
         self.job_retry_queue.grant_consume_messages(self.job_requeuer_lambda)
 
         # Requeuer consumes from queue that the "job monitor" publishes to

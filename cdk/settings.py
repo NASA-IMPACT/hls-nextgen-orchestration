@@ -93,7 +93,7 @@ class StackSettings(BaseSettings):
     # ----- Job retry system
     # Send retryable failed AWS Batch jobs to this queue
     JOB_RETRY_QUEUE_NAME: str
-    # Failed AWS Batch jobs go to a DLQ that can redrive to the retry queueS
+    # Failed AWS Batch jobs go to a DLQ that can redrive to the retry queue
     JOB_FAILURE_DLQ_NAME: str
 
     # ----- Logs inventory Athena database

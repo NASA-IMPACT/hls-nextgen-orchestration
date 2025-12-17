@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Any
 
 import boto3
 from aws_lambda_powertools import Logger, Metrics, Tracer
@@ -18,9 +18,6 @@ from common import (
     ProcessingState,
 )
 from common.granule_logger import GranuleLoggerService
-
-if TYPE_CHECKING:
-    from typing import Any
 
 logger = Logger()
 tracer = Tracer()

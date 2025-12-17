@@ -1,5 +1,5 @@
 import datetime as dt
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BeforeValidator
 from pydantic_settings import BaseSettings
@@ -13,14 +13,14 @@ def include_trailing_slash(value: Any) -> Any:
 
 
 class StackSettings(BaseSettings):
-    """Deployment settings for HLS-VI historical processing."""
+    """Deployment settings for HLS processing."""
 
     STACK_NAME: str
     STAGE: Literal["dev", "prod"]
 
     MCP_ACCOUNT_ID: str
     MCP_ACCOUNT_REGION: str = "us-west-2"
-    MCP_IAM_PERMISSION_BOUNDARY_ARN: str
+    MCP_IAM_PERMISSION_BOUNDARY_ARN: Optional[str] = None
 
     VPC_ID: str
 
@@ -51,17 +51,19 @@ class StackSettings(BaseSettings):
 
     SENTINEL_BUCKET_NAME: str
 
-    # Output bucket for HLS output files
-    OUTPUT_BUCKET_NAME: str
+    AUX_DATA_BUCKET_NAME: str
+
+    # Output bucket for FMASK output files
+    FMASK_OUTPUT_BUCKET_NAME: str
 
     # Debug bucket (optional, but useful for avoiding triggering LPDAAC ingest)
     DEBUG_BUCKET_NAME: str | None = None
 
     # ----- HLS processing
-    PROCESSING_CONTAINER_ECR_URI: str
+    FMASK_CONTAINER_ECR_URI: str
     # Job vCPU and memory limits
-    PROCESSING_JOB_VCPU: int = 1
-    PROCESSING_JOB_MEMORY_MB: int = 2_000
+    FMASK_JOB_VCPU: int = 1
+    FMASK_JOB_MEMORY_MB: int = 2_000
     # Custom log group (otherwise they'll land in the catch-all AWS Batch log group)
     PROCESSING_LOG_GROUP_NAME: str
     # Number of internal AWS Batch job retries
@@ -69,7 +71,10 @@ class StackSettings(BaseSettings):
 
     # AWS Batch cluster reference to SSM parameter describing the AMI _or_ the AMI ID
     # If using SSM to resolve the AMI ID, prefix with `resolve:ssm`.
-    MCP_AMI_ID: str = "resolve:ssm:/mcp/amis/aml2023-ecs"
+    # MCP_AMI_ID: str = "resolve:ssm:/mcp/amis/aml2023-ecs"
+    MCP_AMI_ID: str = (
+        "resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id"
+    )
 
     # Cluster instance classes
     BATCH_INSTANCE_CLASSES: list[str] = [
@@ -82,6 +87,8 @@ class StackSettings(BaseSettings):
 
     # Cluster scaling max
     BATCH_MAX_VCPU: int = 10
+
+    MAX_ACTIVE_JOBS: int = 10_000
 
     # ----- Job retry system
     # Send retryable failed AWS Batch jobs to this queue

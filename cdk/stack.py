@@ -1,9 +1,6 @@
-import os
 from typing import Any, Dict
 
-import jsii
 from aws_cdk import (
-    DockerVolume,
     Duration,
     RemovalPolicy,
     Stack,
@@ -16,10 +13,12 @@ from aws_cdk import (
     aws_lambda_python_alpha as lambda_python,
     aws_s3 as s3,
     aws_s3_notifications as s3_notifications,
+    aws_sns as sns,
+    aws_sns_subscriptions as sns_subscriptions,
     aws_sqs as sqs,
 )
 from constructs import Construct
-from hls_constructs import AthenaLogsDatabase, BatchInfra, BatchJob
+from hls_constructs import BatchInfra, BatchJob
 from settings import StackSettings
 
 LAMBDA_EXCLUDE = [
@@ -39,70 +38,23 @@ LAMBDA_EXCLUDE = [
     "scripts",
 ]
 
-# Mount root level `pyproject.toml` and `uv.lock` into container
-UV_ASSET_REQUIREMENTS = "/asset-requirements"
-UV_DOCKER_VOLUMES = [
-    DockerVolume(
-        host_path=os.path.abspath(file),
-        container_path=f"{UV_ASSET_REQUIREMENTS}/{file}",
-    )
-    for file in (
-        "pyproject.toml",
-        "uv.lock",
-    )
-]
-
-
-@jsii.implements(lambda_python.ICommandHooks)
-class UvHooks:
-    """Build hooks to setup UV and export a requirements.txt for building
-
-    This will be unnecessary after UV support is built-in in aws-lambda-python-alpha,
-    https://github.com/aws/aws-cdk/issues/31238
-    """
-
-    def __init__(self, groups: list[str] | None = None):
-        super().__init__()
-        self.groups = groups
-
-    def after_bundling(self, input_dir: str, output_dir: str) -> list[str]:
-        return []
-
-    def before_bundling(self, input_dir: str, output_dir: str) -> list[str]:
-        if self.groups:
-            groups_arg = " ".join([f"--group {group}" for group in self.groups])
-        else:
-            groups_arg = " "
-
-        return [
-            f"python -m venv {input_dir}/uv_venv",
-            f". {input_dir}/uv_venv/bin/activate",
-            "pip install uv",
-            "export UV_CACHE_DIR=/tmp",
-            f"cd {UV_ASSET_REQUIREMENTS}",
-            (
-                f"uv export {groups_arg} --frozen --no-emit-project --no-dev "
-                f"--no-default-groups --no-editable -o {input_dir}/requirements.txt"
-            ),
-            f"rm -rf {input_dir}/uv_venv",
-        ]
-
 
 class HlsStack(Stack):
-    """HLS-VI historical processing CDK stack."""
+    """HLS processing CDK stack."""
 
     def __init__(
         self, scope: Construct, stack_id: str, *, settings: StackSettings, **kwargs: Any
     ) -> None:
         super().__init__(scope, stack_id, **kwargs)
 
-        # Apply IAM permission boundary to entire stack
-        boundary = iam.ManagedPolicy.from_managed_policy_arn(
-            self,
-            "PermissionBoundary",
-            settings.MCP_IAM_PERMISSION_BOUNDARY_ARN,
-        )
-        iam.PermissionsBoundary.of(self).apply(boundary)
+        if settings.MCP_IAM_PERMISSION_BOUNDARY_ARN:
+            # Apply IAM permission boundary to entire stack
+            boundary = iam.ManagedPolicy.from_managed_policy_arn(
+                self,
+                "PermissionBoundary",
+                settings.MCP_IAM_PERMISSION_BOUNDARY_ARN,
+            )
+            iam.PermissionsBoundary.of(self).apply(boundary)
 
         # ----------------------------------------------------------------------
         # Networking
@@ -122,10 +74,25 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # Buckets
         # ----------------------------------------------------------------------
-        self.output_bucket = s3.Bucket.from_bucket_name(
+        self.aux_data_bucket = s3.Bucket.from_bucket_name(
             self,
-            "OutputBucket",
-            bucket_name=settings.OUTPUT_BUCKET_NAME,
+            "AuxDataBucket",
+            bucket_name=settings.AUX_DATA_BUCKET_NAME,
+        )
+
+        self.fmask_bucket = s3.Bucket(
+            self,
+            "FmaskBucket",
+            bucket_name=settings.FMASK_OUTPUT_BUCKET_NAME,
+            removal_policy=RemovalPolicy.DESTROY,
+            lifecycle_rules=[
+                s3.LifecycleRule(expired_object_delete_marker=True),
+                s3.LifecycleRule(
+                    abort_incomplete_multipart_upload_after=Duration.days(1),
+                    noncurrent_version_expiration=Duration.days(1),
+                ),
+            ],
+            encryption=s3.BucketEncryption.S3_MANAGED,
         )
 
         self.processing_bucket = s3.Bucket(
@@ -165,7 +132,7 @@ class HlsStack(Stack):
         )
 
         bucket_envvars = {
-            "OUTPUT_BUCKET": settings.OUTPUT_BUCKET_NAME,
+            "FMASK_OUTPUT_BUCKET_NAME": settings.FMASK_OUTPUT_BUCKET_NAME,
         }
 
         self.debug_bucket: s3.IBucket | None
@@ -220,26 +187,6 @@ class HlsStack(Stack):
             )
         )
 
-        logs_s3_inventory_location_s3path = "/".join(
-            [
-                f"s3://{settings.PROCESSING_BUCKET_NAME}",
-                settings.PROCESSING_BUCKET_LOGS_INVENTORY_PREFIX.rstrip("/"),
-                settings.PROCESSING_BUCKET_NAME,
-                inventory_id,
-                "hive",
-            ]
-        )
-
-        self.athena_logs_database = AthenaLogsDatabase(
-            self,
-            "AthenaLogsDatabase",
-            database_name=settings.ATHENA_LOGS_DATABASE_NAME,
-            table_datetime_start=settings.ATHENA_LOGS_S3_INVENTORY_TABLE_START_DATETIME,
-            logs_s3_inventory_location_s3path=logs_s3_inventory_location_s3path,
-            logs_s3_inventory_table_name=settings.ATHENA_LOGS_S3_INVENTORY_TABLE_NAME,
-            granule_processing_events_view_name=settings.ATHENA_LOGS_GRANULE_PROCESSING_EVENTS_VIEW_NAME,
-        )
-
         # ----------------------------------------------------------------------
         # AWS Batch infrastructure
         # ----------------------------------------------------------------------
@@ -254,28 +201,33 @@ class HlsStack(Stack):
         )
 
         # ----------------------------------------------------------------------
-        # HLS processing compute job
+        # HLS processing compute jobs
         # ----------------------------------------------------------------------
         secrets: Dict[str, batch.Secret] = {}
 
-        self.processing_job = BatchJob(
+        self.fmask_job = BatchJob(
             self,
-            "HLS-Processing",
-            container_ecr_uri=settings.PROCESSING_CONTAINER_ECR_URI,
-            vcpu=settings.PROCESSING_JOB_VCPU,
-            memory_mb=settings.PROCESSING_JOB_MEMORY_MB,
+            "FmaskJob",
+            container_ecr_uri=settings.FMASK_CONTAINER_ECR_URI,
+            vcpu=settings.FMASK_JOB_VCPU,
+            memory_mb=settings.FMASK_JOB_MEMORY_MB,
             retry_attempts=settings.PROCESSING_JOB_RETRY_ATTEMPTS,
             log_group_name=settings.PROCESSING_LOG_GROUP_NAME,
             environment={
                 "PYTHONUNBUFFERED": "TRUE",
+                "SENTINEL_BUCKET_NAME": self.sentinel_bucket.bucket_name,
+                "FMASK_OUTPUT_BUCKET_NAME": self.fmask_bucket.bucket_name,
+                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
             },
             secrets=secrets,
             stage=settings.STAGE,
         )
-        self.processing_bucket.grant_read_write(self.processing_job.role)
-        self.output_bucket.grant_read_write(self.processing_job.role)
+
+        self.fmask_bucket.grant_read_write(self.fmask_job.role)
+        self.sentinel_bucket.grant_read(self.fmask_job.role)
+        self.aux_data_bucket.grant_read(self.fmask_job.role)
         if self.debug_bucket is not None:
-            self.debug_bucket.grant_read(self.processing_job.role)
+            self.debug_bucket.grant_read(self.fmask_job.role)
 
         # ----------------------------------------------------------------------
         # Job monitor & retry system
@@ -326,12 +278,9 @@ class HlsStack(Stack):
                 ),
             },
             bundling=lambda_python.BundlingOptions(
-                command_hooks=UvHooks(),
                 asset_excludes=LAMBDA_EXCLUDE,
-                volumes=UV_DOCKER_VOLUMES,
             ),
         )
-
         self.processing_bucket.grant_read_write(
             self.job_monitor_lambda,
         )
@@ -352,7 +301,7 @@ class HlsStack(Stack):
                     "jobDefinition": [
                         {
                             "wildcard": (
-                                f"*{self.processing_job.job_def.job_definition_name}*"
+                                f"*{self.fmask_job.job_def.job_definition_name}*"
                             )
                         },
                     ],
@@ -382,31 +331,26 @@ class HlsStack(Stack):
             environment={
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "BATCH_JOB_DEFINITION_NAME": (
-                    self.processing_job.job_def.job_definition_name
+                    self.fmask_job.job_def.job_definition_name
                 ),
                 **bucket_envvars,
             },
             bundling=lambda_python.BundlingOptions(
-                command_hooks=UvHooks(),
                 asset_excludes=LAMBDA_EXCLUDE,
-                volumes=UV_DOCKER_VOLUMES,
             ),
         )
 
-        self.processing_bucket.grant_read_write(
-            self.job_requeuer_lambda, objects_key_pattern="logs/*"
-        )
-        self.batch_sumbit_job_policy = iam.PolicyStatement(
+        self.batch_submit_job_policy = iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             resources=[
                 self.batch_infra.queue.job_queue_arn,
-                self.processing_job.job_def_arn_without_revision,
+                self.fmask_job.job_def_arn_without_revision,
             ],
             actions=[
                 "batch:SubmitJob",
             ],
         )
-        self.job_requeuer_lambda.add_to_role_policy(self.batch_sumbit_job_policy)
+        self.job_requeuer_lambda.add_to_role_policy(self.batch_submit_job_policy)
         self.job_retry_queue.grant_consume_messages(self.job_requeuer_lambda)
 
         # Requeuer consumes from queue that the "job monitor" publishes to
@@ -418,26 +362,88 @@ class HlsStack(Stack):
             event_source_arn=self.job_retry_queue.queue_arn,
         )
 
-        self.granule_queuer_lambda = lambda_python.PythonFunction(
+        self.sentinel_topic = sns.Topic(
             self,
-            "GranuleQueuerLambda",
+            "SentinelTopic",
+        )
+
+        self.sentinel_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3_notifications.SnsDestination(self.sentinel_topic),
+        )
+
+        self.granule_entry_queue = sqs.Queue(
+            self,
+            "GranuleEntryQueue",
+            retention_period=Duration.days(14),
+            visibility_timeout=Duration.minutes(10),
+        )
+
+        self.sentinel_topic.add_subscription(
+            sns_subscriptions.SqsSubscription(self.granule_entry_queue)
+        )
+
+        self.powertools_layer = lambda_.LayerVersion.from_layer_version_arn(
+            self,
+            "PowertoolsLayer",
+            layer_version_arn=f"arn:aws:lambda:{self.region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-x86_64:18",
+        )
+
+        self.granule_entry_lambda = lambda_python.PythonFunction(
+            self,
+            "GranuleEntryLambda",
             entry="src/",
-            index="granule_queuer/handler.py",
+            index="granule_entry/handler.py",
             handler="handler",
             runtime=lambda_.Runtime.PYTHON_3_12,
             memory_size=512,
             timeout=Duration.minutes(10),
+            environment={
+                "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
+                "PROCESSING_BUCKET_LOG_PREFIX": settings.PROCESSING_BUCKET_LOG_PREFIX,
+                "FMASK_OUTPUT_BUCKET_NAME": self.fmask_bucket.bucket_name,
+                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
+                "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
+                "MAX_ACTIVE_JOBS": str(settings.MAX_ACTIVE_JOBS),
+                "FMASK_JOB_DEFINITION_NAME": self.fmask_job.job_def.job_definition_name,
+            },
+            layers=[self.powertools_layer],
             bundling=lambda_python.BundlingOptions(
-                command_hooks=UvHooks(),
                 asset_excludes=LAMBDA_EXCLUDE,
-                volumes=UV_DOCKER_VOLUMES,
             ),
         )
 
-        self.sentinel_bucket.grant_read(self.granule_queuer_lambda)
+        self.granule_entry_queue.grant_consume_messages(self.granule_entry_lambda)
+        self.processing_bucket.grant_read_write(self.granule_entry_lambda)
+        self.aux_data_bucket.grant_read_write(self.granule_entry_lambda)
 
-        self.sentinel_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3_notifications.LambdaDestination(self.granule_queuer_lambda),
+        self.granule_entry_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                resources=[
+                    self.batch_infra.queue.job_queue_arn,
+                    self.fmask_job.job_def_arn_without_revision,
+                ],
+                actions=[
+                    "batch:SubmitJob",
+                ],
+            )
         )
-        self.granule_queuer_lambda.add_to_role_policy(self.batch_sumbit_job_policy)
+        self.granule_entry_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                resources=["*"],
+                actions=[
+                    "batch:ListJobs",
+                ],
+            )
+        )
+
+        # Granule queuer consumes from the granule queue
+        self.granule_entry_lambda.add_event_source_mapping(
+            "GranuleQueuerQueueTrigger",
+            batch_size=100,
+            max_batching_window=Duration.minutes(1),
+            report_batch_item_failures=True,
+            event_source_arn=self.granule_entry_queue.queue_arn,
+        )

@@ -101,7 +101,7 @@ class BatchJob(Construct):
             self,
             "TaskRole",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
-            role_name=f"hls-vi-historical-processing-role-{stage}",
+            role_name=f"hls-processing-role-{stage}",
         )
 
         self.job_def = batch.EcsJobDefinition(

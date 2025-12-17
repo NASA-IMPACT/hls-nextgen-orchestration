@@ -73,11 +73,14 @@ class TestJobDetail:
         detail = job_detail_failed_error.copy()
         detail["container"]["environment"] = [
             {"name": "GRANULE_ID", "value": "foo"},
+            {"name": "SOURCE_GRANULE_ID", "value": "bar"},
             {"name": "ATTEMPT", "value": "0"},
         ]
         event_details = JobDetails(detail).get_granule_event()
 
-        assert event_details == GranuleProcessingEvent(granule_id="foo", attempt=0)
+        assert event_details == GranuleProcessingEvent(
+            granule_id="foo", source_granule_id="bar", attempt=0
+        )
 
 
 def make_job_summary_list(count: int, status: str) -> list[dict[str, Any]]:

@@ -15,13 +15,21 @@ from mypy_boto3_sqs import SQSClient
 from common.aws_batch import AwsBatchClient, JobChangeEvent
 from common.models import GranuleId
 
+# Set metrics namespace before any modules are imported
+os.environ["POWERTOOLS_METRICS_NAMESPACE"] = "test-namespace"
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture
 def granule_id() -> GranuleId:
     """A valid, example granule ID"""
-    return GranuleId.from_str("HLS.S30.T01GBH.2022226T214921.v2.0")
+    return GranuleId.from_str("HLS.S30.T18TYN.2023229T154921.v2.0")
+
+
+@pytest.fixture
+def source_granule_id() -> str:
+    return "S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510"
 
 
 @pytest.fixture
@@ -75,6 +83,25 @@ def output_bucket(s3: S3Client, monkeypatch: pytest.MonkeyPatch) -> str:
     )
     monkeypatch.setenv("OUTPUT_BUCKET", "output")
     return "output"
+
+
+@pytest.fixture
+def aux_bucket(
+    s3: S3Client, granule_id: GranuleId, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """Create the aux bucket, returning bucket name and setting envar"""
+    s3.create_bucket(
+        Bucket="aux", CreateBucketConfiguration={"LocationConstraint": "us-west-2"}
+    )
+    name = "aux"
+    year = granule_id.begin_datetime.strftime("%Y")
+    ydoy = granule_id.begin_datetime.strftime("%Y%j")
+    s3.put_object(
+        Bucket=name,
+        Key=f"lasrc_aux/LADS/{year}/VJ104ANC.A{ydoy}",
+    )
+    monkeypatch.setenv("AUX_DATA_BUCKET_NAME", "aux")
+    return "aux"
 
 
 # ==============================================================================
@@ -183,5 +210,15 @@ def mocked_batch_client_submit_job() -> Iterator[MagicMock]:
         AwsBatchClient,
         "submit_job",
         return_value="foo-job-id",
+    ) as mock:
+        yield mock
+
+
+@pytest.fixture
+def mocked_active_jobs_below_threshold() -> Iterator[MagicMock]:
+    with patch.object(
+        AwsBatchClient,
+        "active_jobs_below_threshold",
+        return_value=True,
     ) as mock:
         yield mock

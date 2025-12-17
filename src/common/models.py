@@ -95,12 +95,16 @@ class GranuleId:
             ]
         )
 
+    def doy(self) -> str:
+        return self.begin_datetime.strftime(HLS_GRANULE_ID_STRFTIME)
+
 
 @dataclass(frozen=True)
 class GranuleProcessingEvent:
     """Event message for granule processing jobs"""
 
     granule_id: str
+    source_granule_id: str
     attempt: int = 0
     # Events _may_ contain a reference to a debug bucket if the job was
     # submitted in debug mode.
@@ -110,6 +114,7 @@ class GranuleProcessingEvent:
         """Return a new GranuleProcessingEvent for another attempt"""
         return GranuleProcessingEvent(
             granule_id=self.granule_id,
+            source_granule_id=self.source_granule_id,
             attempt=self.attempt + 1,
             debug_bucket=self.debug_bucket,
         )
@@ -122,6 +127,8 @@ class GranuleProcessingEvent:
         }
         if self.debug_bucket:
             envvars["DEBUG_BUCKET"] = self.debug_bucket
+        if self.source_granule_id:
+            envvars["SOURCE_GRANULE_ID"] = self.source_granule_id
         return envvars
 
     @classmethod
@@ -136,6 +143,7 @@ class GranuleProcessingEvent:
         return cls(
             granule_id=env["GRANULE_ID"],
             attempt=int(env["ATTEMPT"]),
+            source_granule_id=str(env["SOURCE_GRANULE_ID"]),
             debug_bucket=env.get("DEBUG_BUCKET"),
         )
 
@@ -151,6 +159,7 @@ class GranuleProcessingEvent:
         data = json.loads(json_str)
         return cls(
             granule_id=data["granule_id"],
+            source_granule_id=data["source_granule_id"],
             attempt=data["attempt"],
             debug_bucket=data.get("debug_bucket"),
         )

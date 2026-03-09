@@ -73,7 +73,7 @@ class StackSettings(BaseSettings):
     # If using SSM to resolve the AMI ID, prefix with `resolve:ssm`.
     # MCP_AMI_ID: str = "resolve:ssm:/mcp/amis/aml2023-ecs"
     MCP_AMI_ID: str = (
-        "resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id"
+        "resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id"
     )
 
     # Cluster instance classes

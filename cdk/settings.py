@@ -1,5 +1,5 @@
 import datetime as dt
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal
 
 from pydantic import BeforeValidator
 from pydantic_settings import BaseSettings
@@ -20,7 +20,7 @@ class StackSettings(BaseSettings):
 
     MCP_ACCOUNT_ID: str
     MCP_ACCOUNT_REGION: str = "us-west-2"
-    MCP_IAM_PERMISSION_BOUNDARY_ARN: Optional[str] = None
+    MCP_IAM_PERMISSION_BOUNDARY_ARN: str | None = None
 
     VPC_ID: str
 
@@ -34,36 +34,23 @@ class StackSettings(BaseSettings):
     # Whether to enable use and scheduling of credential rotation.
 
     # ----- Buckets
-    # Job processing bucket for state (inventories, failures, etc)
     PROCESSING_BUCKET_NAME: str
-    # LPDAAC granule inventories prefix
-    PROCESSING_BUCKET_GRANULE_INVENTORY_PREFIX: Annotated[
-        str, BeforeValidator(include_trailing_slash)
-    ] = "granule-inventories/"
-    # Granule processing event logs prefix
-    PROCESSING_BUCKET_LOG_PREFIX: Annotated[
-        str, BeforeValidator(include_trailing_slash)
-    ] = "logs/"
-    # Prefix for S3 inventories of granule processing logs
-    PROCESSING_BUCKET_LOGS_INVENTORY_PREFIX: Annotated[
-        str, BeforeValidator(include_trailing_slash)
-    ] = "logs-inventories/"
 
     SENTINEL_BUCKET_NAME: str
 
     AUX_DATA_BUCKET_NAME: str
 
-    # Output bucket for FMASK output files
-    FMASK_OUTPUT_BUCKET_NAME: str
+    # Output bucket for processed products
+    OUTPUT_BUCKET_NAME: str
 
     # Debug bucket (optional, but useful for avoiding triggering LPDAAC ingest)
     DEBUG_BUCKET_NAME: str | None = None
 
     # ----- HLS processing
-    FMASK_CONTAINER_ECR_URI: str
+    SENTINEL_CONTAINER_ECR_URI: str
     # Job vCPU and memory limits
-    FMASK_JOB_VCPU: int = 1
-    FMASK_JOB_MEMORY_MB: int = 2_000
+    SENTINEL_JOB_VCPU: int = 1
+    SENTINEL_JOB_MEMORY_MB: int = 2_000
     # Custom log group (otherwise they'll land in the catch-all AWS Batch log group)
     PROCESSING_LOG_GROUP_NAME: str
     # Number of internal AWS Batch job retries
@@ -73,7 +60,8 @@ class StackSettings(BaseSettings):
     # If using SSM to resolve the AMI ID, prefix with `resolve:ssm`.
     # MCP_AMI_ID: str = "resolve:ssm:/mcp/amis/aml2023-ecs"
     MCP_AMI_ID: str = (
-        "resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id"
+        "resolve:ssm:/aws/service/ecs/optimized-ami"
+        "/amazon-linux-2023/recommended/image_id"
     )
 
     # Cluster instance classes
@@ -96,8 +84,22 @@ class StackSettings(BaseSettings):
     # Failed AWS Batch jobs go to a DLQ that can redrive to the retry queue
     JOB_FAILURE_DLQ_NAME: str
 
-    # ----- Logs inventory Athena database
-    ATHENA_LOGS_DATABASE_NAME: str
-    ATHENA_LOGS_S3_INVENTORY_TABLE_START_DATETIME: dt.datetime
-    ATHENA_LOGS_S3_INVENTORY_TABLE_NAME: str = "logs_s3_inventories"
-    ATHENA_LOGS_GRANULE_PROCESSING_EVENTS_VIEW_NAME: str = "granule_processing_events"
+    # ----- Ancillary trigger
+    # SQS queue that receives S3 event notifications from the aux data bucket
+    ANCILLARY_TRIGGER_QUEUE_NAME: str
+
+    # ----- State-pointer inventory (state/ prefix → daily S3 inventory)
+    STATE_INVENTORY_PREFIX: Annotated[str, BeforeValidator(include_trailing_slash)] = (
+        "state-inventories/"
+    )
+
+    # ----- Records Athena database
+    ATHENA_RECORDS_DATABASE_NAME: str
+    ATHENA_RECORDS_TABLE_START_DATE: str = "2020-01-01"
+    ATHENA_RECORDS_SENTINEL_TABLE_NAME: str = "records_sentinel"
+
+    # ----- State Athena database (S3 inventory over state/ prefix)
+    ATHENA_STATE_DATABASE_NAME: str
+    ATHENA_STATE_TABLE_START_DATETIME: dt.datetime
+    ATHENA_STATE_TABLE_NAME: str = "state_inventory"
+    ATHENA_STATE_VIEW_NAME: str = "current_granule_states"

@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any
 
 from aws_cdk import (
     Duration,
@@ -18,7 +18,13 @@ from aws_cdk import (
     aws_sqs as sqs,
 )
 from constructs import Construct
-from hls_constructs import BatchInfra, BatchJob
+
+from hls_constructs import (
+    AthenaRecordsDatabase,
+    AthenaStateDatabase,
+    BatchInfra,
+    BatchJob,
+)
 from settings import StackSettings
 
 LAMBDA_EXCLUDE = [
@@ -48,7 +54,6 @@ class HlsStack(Stack):
         super().__init__(scope, stack_id, **kwargs)
 
         if settings.MCP_IAM_PERMISSION_BOUNDARY_ARN:
-            # Apply IAM permission boundary to entire stack
             boundary = iam.ManagedPolicy.from_managed_policy_arn(
                 self,
                 "PermissionBoundary",
@@ -61,10 +66,6 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         self.vpc = ec2.Vpc.from_lookup(self, "VPC", vpc_id=settings.VPC_ID)
 
-        # Use S3 VPC endpoint to accelerate within-region traffic.
-        # For now, only add to prod stack to avoid unnecessary duplicates.
-        # It'd be better to have this as part of our (MCP owned) networking stack
-        # in the long run.
         if settings.STAGE == "prod":
             self.vpc.add_gateway_endpoint(
                 "S3",
@@ -80,60 +81,17 @@ class HlsStack(Stack):
             bucket_name=settings.AUX_DATA_BUCKET_NAME,
         )
 
-        self.fmask_bucket = s3.Bucket(
-            self,
-            "FmaskBucket",
-            bucket_name=settings.FMASK_OUTPUT_BUCKET_NAME,
-            removal_policy=RemovalPolicy.DESTROY,
-            lifecycle_rules=[
-                s3.LifecycleRule(expired_object_delete_marker=True),
-                s3.LifecycleRule(
-                    abort_incomplete_multipart_upload_after=Duration.days(1),
-                    noncurrent_version_expiration=Duration.days(1),
-                ),
-            ],
-            encryption=s3.BucketEncryption.S3_MANAGED,
+        self.processing_bucket = self._make_bucket(
+            "ProcessingBucket", settings.PROCESSING_BUCKET_NAME
         )
-
-        self.processing_bucket = s3.Bucket(
-            self,
-            "ProcessingBucket",
-            bucket_name=settings.PROCESSING_BUCKET_NAME,
-            removal_policy=RemovalPolicy.DESTROY,
-            lifecycle_rules=[
-                # Setting expired_object_delete_marker cannot be done within a
-                # lifecycle rule that also specifies expiration, expiration_date, or
-                # tag_filters.
-                s3.LifecycleRule(expired_object_delete_marker=True),
-                s3.LifecycleRule(
-                    abort_incomplete_multipart_upload_after=Duration.days(1),
-                    noncurrent_version_expiration=Duration.days(1),
-                ),
-            ],
-            encryption=s3.BucketEncryption.S3_MANAGED,
+        # FIXME: this bucket already exists, so import it post-MVP
+        self.output_bucket = self._make_bucket(
+            "OutputBucket", settings.OUTPUT_BUCKET_NAME
         )
-
-        self.sentinel_bucket = s3.Bucket(
-            self,
-            "SentinelBucket",
-            bucket_name=settings.SENTINEL_BUCKET_NAME,
-            removal_policy=RemovalPolicy.DESTROY,
-            lifecycle_rules=[
-                # Setting expired_object_delete_marker cannot be done within a
-                # lifecycle rule that also specifies expiration, expiration_date, or
-                # tag_filters.
-                s3.LifecycleRule(expired_object_delete_marker=True),
-                s3.LifecycleRule(
-                    abort_incomplete_multipart_upload_after=Duration.days(1),
-                    noncurrent_version_expiration=Duration.days(1),
-                ),
-            ],
-            encryption=s3.BucketEncryption.S3_MANAGED,
+        # FIXME: this bucket already exists, so import it post-MVP
+        self.sentinel_bucket = self._make_bucket(
+            "SentinelBucket", settings.SENTINEL_BUCKET_NAME
         )
-
-        bucket_envvars = {
-            "FMASK_OUTPUT_BUCKET_NAME": settings.FMASK_OUTPUT_BUCKET_NAME,
-        }
 
         self.debug_bucket: s3.IBucket | None
         if settings.DEBUG_BUCKET_NAME:
@@ -142,49 +100,64 @@ class HlsStack(Stack):
                 "DebugBucket",
                 bucket_name=settings.DEBUG_BUCKET_NAME,
             )
-            bucket_envvars["DEBUG_BUCKET"] = settings.DEBUG_BUCKET_NAME
         else:
             self.debug_bucket = None
 
         # ----------------------------------------------------------------------
-        # S3 processing bucket inventory to track our logs
+        # S3 inventory: state/ prefix → feeds AthenaStateDatabase
         # ----------------------------------------------------------------------
-        inventory_id = "granule_processing_logs"
         self.processing_bucket.add_inventory(
             enabled=True,
             destination=s3.InventoryDestination(
-                bucket=s3.Bucket.from_bucket_name(
-                    self, "ProcessingBucketRef", settings.PROCESSING_BUCKET_NAME
-                ),
-                prefix=settings.PROCESSING_BUCKET_LOGS_INVENTORY_PREFIX.rstrip("/"),
+                bucket=self.processing_bucket,
+                prefix=settings.STATE_INVENTORY_PREFIX.rstrip("/"),
             ),
-            inventory_id=inventory_id,
+            inventory_id="state-pointers",
             format=s3.InventoryFormat.PARQUET,
             frequency=s3.InventoryFrequency.DAILY,
-            objects_prefix=settings.PROCESSING_BUCKET_LOG_PREFIX,
+            objects_prefix="state/",
             optional_fields=["LastModifiedDate"],
         )
         self.processing_bucket.add_lifecycle_rule(
-            prefix=settings.PROCESSING_BUCKET_LOGS_INVENTORY_PREFIX,
+            prefix=settings.STATE_INVENTORY_PREFIX,
             expiration=Duration.days(14),
         )
-
-        # S3 service also needs permissions to push to the bucket
         self.processing_bucket.add_to_resource_policy(
             iam.PolicyStatement(
-                actions=[
-                    "s3:PutObject",
-                ],
+                actions=["s3:PutObject"],
                 resources=[
                     self.processing_bucket.arn_for_objects(
-                        f"{settings.PROCESSING_BUCKET_LOGS_INVENTORY_PREFIX}*"
+                        f"{settings.STATE_INVENTORY_PREFIX}*"
                     ),
                 ],
-                principals=[
-                    iam.ServicePrincipal("s3.amazonaws.com"),
-                ],
+                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
                 effect=iam.Effect.ALLOW,
             )
+        )
+
+        # ----------------------------------------------------------------------
+        # Athena databases
+        # ----------------------------------------------------------------------
+        self.athena_records_db = AthenaRecordsDatabase(
+            self,
+            "AthenaRecordsDatabase",
+            database_name=settings.ATHENA_RECORDS_DATABASE_NAME,
+            records_bucket_name=settings.PROCESSING_BUCKET_NAME,
+            table_date_range_start=settings.ATHENA_RECORDS_TABLE_START_DATE,
+            sentinel_table_name=settings.ATHENA_RECORDS_SENTINEL_TABLE_NAME,
+        )
+
+        self.athena_state_db = AthenaStateDatabase(
+            self,
+            "AthenaStateDatabase",
+            database_name=settings.ATHENA_STATE_DATABASE_NAME,
+            inventory_location_s3path=(
+                f"s3://{settings.PROCESSING_BUCKET_NAME}"
+                f"/{settings.STATE_INVENTORY_PREFIX}"
+            ),
+            table_datetime_start=settings.ATHENA_STATE_TABLE_START_DATETIME,
+            table_name=settings.ATHENA_STATE_TABLE_NAME,
+            view_name=settings.ATHENA_STATE_VIEW_NAME,
         )
 
         # ----------------------------------------------------------------------
@@ -203,36 +176,45 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # HLS processing compute jobs
         # ----------------------------------------------------------------------
-        secrets: Dict[str, batch.Secret] = {}
+        secrets: dict[str, batch.Secret] = {}
 
-        self.fmask_job = BatchJob(
+        self.sentinel_job = BatchJob(
             self,
-            "FmaskJob",
-            container_ecr_uri=settings.FMASK_CONTAINER_ECR_URI,
-            vcpu=settings.FMASK_JOB_VCPU,
-            memory_mb=settings.FMASK_JOB_MEMORY_MB,
+            "SentinelJob",
+            container_ecr_uri=settings.SENTINEL_CONTAINER_ECR_URI,
+            vcpu=settings.SENTINEL_JOB_VCPU,
+            memory_mb=settings.SENTINEL_JOB_MEMORY_MB,
             retry_attempts=settings.PROCESSING_JOB_RETRY_ATTEMPTS,
             log_group_name=settings.PROCESSING_LOG_GROUP_NAME,
             environment={
                 "PYTHONUNBUFFERED": "TRUE",
                 "SENTINEL_BUCKET_NAME": self.sentinel_bucket.bucket_name,
-                "FMASK_OUTPUT_BUCKET_NAME": self.fmask_bucket.bucket_name,
+                "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
                 "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
             },
             secrets=secrets,
             stage=settings.STAGE,
         )
 
-        self.fmask_bucket.grant_read_write(self.fmask_job.role)
-        self.sentinel_bucket.grant_read(self.fmask_job.role)
-        self.aux_data_bucket.grant_read(self.fmask_job.role)
+        self.output_bucket.grant_read_write(self.sentinel_job.role)
+        self.sentinel_bucket.grant_read(self.sentinel_job.role)
+        self.aux_data_bucket.grant_read(self.sentinel_job.role)
         if self.debug_bucket is not None:
-            self.debug_bucket.grant_read(self.fmask_job.role)
+            self.debug_bucket.grant_read(self.sentinel_job.role)
+
+        # Shared policy for Batch job submission
+        self.batch_submit_job_policy = iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            resources=[
+                self.batch_infra.queue.job_queue_arn,
+                self.sentinel_job.job_def_arn_without_revision,
+            ],
+            actions=["batch:SubmitJob"],
+        )
 
         # ----------------------------------------------------------------------
         # Job monitor & retry system
         # ----------------------------------------------------------------------
-        # Queue for job failures we need to investigate (bugs, repeat errors, etc)
         self.job_failure_dlq = sqs.Queue(
             self,
             "JobRetryFailureDLQ",
@@ -242,14 +224,12 @@ class HlsStack(Stack):
             encryption=sqs.QueueEncryption.SQS_MANAGED,
         )
 
-        # Queue for failed AWS Batch processing jobs we want to requeue
         self.job_retry_queue = sqs.Queue(
             self,
             "JobRetryFailureQueue",
             queue_name=settings.JOB_RETRY_QUEUE_NAME,
             dead_letter_queue=sqs.DeadLetterQueue(
                 queue=self.job_failure_dlq,
-                # Route to DLQ immediately if we can't process
                 max_receive_count=1,
             ),
             retention_period=Duration.days(14),
@@ -269,7 +249,6 @@ class HlsStack(Stack):
             timeout=Duration.minutes(1),
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
-                "PROCESSING_BUCKET_LOG_PREFIX": settings.PROCESSING_BUCKET_LOG_PREFIX,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "JOB_RETRY_QUEUE_URL": self.job_retry_queue.queue_url,
                 "JOB_FAILURE_DLQ_URL": self.job_failure_dlq.queue_url,
@@ -281,27 +260,22 @@ class HlsStack(Stack):
                 asset_excludes=LAMBDA_EXCLUDE,
             ),
         )
-        self.processing_bucket.grant_read_write(
-            self.job_monitor_lambda,
-        )
+        self.processing_bucket.grant_read_write(self.job_monitor_lambda)
         self.job_retry_queue.grant_send_messages(self.job_monitor_lambda)
         self.job_failure_dlq.grant_send_messages(self.job_monitor_lambda)
 
-        # Events from AWS Batch "job state change events" in our processing queue
-        # Ref: https://docs.aws.amazon.com/batch/latest/userguide/batch_job_events.html
+        # EventBridge rule: Batch job state changes from our queue/job definition
         self.processing_job_events_rule = events.Rule(
             self,
             "ProcessingJobEventsRule",
             event_pattern=events.EventPattern(
                 source=["aws.batch"],
                 detail={
-                    # only retry jobs from our queue and job definition that failed
-                    # on their last attempt
                     "jobQueue": [self.batch_infra.queue.job_queue_arn],
                     "jobDefinition": [
                         {
                             "wildcard": (
-                                f"*{self.fmask_job.job_def.job_definition_name}*"
+                                f"*{self.sentinel_job.job_def.job_definition_name}*"
                             )
                         },
                     ],
@@ -317,7 +291,7 @@ class HlsStack(Stack):
         )
 
         # ----------------------------------------------------------------------
-        # Requeuer
+        # Job requeuer
         # ----------------------------------------------------------------------
         self.job_requeuer_lambda = lambda_python.PythonFunction(
             self,
@@ -329,31 +303,22 @@ class HlsStack(Stack):
             memory_size=256,
             timeout=Duration.minutes(1),
             environment={
+                "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "BATCH_JOB_DEFINITION_NAME": (
-                    self.fmask_job.job_def.job_definition_name
+                    self.sentinel_job.job_def.job_definition_name
                 ),
-                **bucket_envvars,
+                "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
             },
             bundling=lambda_python.BundlingOptions(
                 asset_excludes=LAMBDA_EXCLUDE,
             ),
         )
 
-        self.batch_submit_job_policy = iam.PolicyStatement(
-            effect=iam.Effect.ALLOW,
-            resources=[
-                self.batch_infra.queue.job_queue_arn,
-                self.fmask_job.job_def_arn_without_revision,
-            ],
-            actions=[
-                "batch:SubmitJob",
-            ],
-        )
         self.job_requeuer_lambda.add_to_role_policy(self.batch_submit_job_policy)
+        self.processing_bucket.grant_read_write(self.job_requeuer_lambda)
         self.job_retry_queue.grant_consume_messages(self.job_requeuer_lambda)
 
-        # Requeuer consumes from queue that the "job monitor" publishes to
         self.job_requeuer_lambda.add_event_source_mapping(
             "JobRequeuerRetryQueueTrigger",
             batch_size=100,
@@ -362,6 +327,9 @@ class HlsStack(Stack):
             event_source_arn=self.job_retry_queue.queue_arn,
         )
 
+        # ----------------------------------------------------------------------
+        # Granule-init Lambda (Sentinel-2 arrival → AWAITING or SUBMITTED)
+        # ----------------------------------------------------------------------
         self.sentinel_topic = sns.Topic(
             self,
             "SentinelTopic",
@@ -372,15 +340,15 @@ class HlsStack(Stack):
             s3_notifications.SnsDestination(self.sentinel_topic),
         )
 
-        self.granule_entry_queue = sqs.Queue(
+        self.granule_init_queue = sqs.Queue(
             self,
-            "GranuleEntryQueue",
+            "GranuleInitQueue",
             retention_period=Duration.days(14),
             visibility_timeout=Duration.minutes(10),
         )
 
         self.sentinel_topic.add_subscription(
-            sns_subscriptions.SqsSubscription(self.granule_entry_queue)
+            sns_subscriptions.SqsSubscription(self.granule_init_queue)
         )
 
         self.powertools_layer = lambda_.LayerVersion.from_layer_version_arn(
@@ -389,23 +357,25 @@ class HlsStack(Stack):
             layer_version_arn=f"arn:aws:lambda:{self.region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-x86_64:18",
         )
 
-        self.granule_entry_lambda = lambda_python.PythonFunction(
+        self.granule_init_lambda = lambda_python.PythonFunction(
             self,
-            "GranuleEntryLambda",
+            "GranuleInitLambda",
             entry="src/",
-            index="granule_entry/handler.py",
+            index="granule_init/handler.py",
             handler="handler",
             runtime=lambda_.Runtime.PYTHON_3_12,
             memory_size=512,
             timeout=Duration.minutes(10),
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
-                "PROCESSING_BUCKET_LOG_PREFIX": settings.PROCESSING_BUCKET_LOG_PREFIX,
-                "FMASK_OUTPUT_BUCKET_NAME": self.fmask_bucket.bucket_name,
+                "SENTINEL_BUCKET_NAME": self.sentinel_bucket.bucket_name,
+                "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
                 "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "MAX_ACTIVE_JOBS": str(settings.MAX_ACTIVE_JOBS),
-                "FMASK_JOB_DEFINITION_NAME": self.fmask_job.job_def.job_definition_name,
+                "SENTINEL_JOB_DEFINITION_NAME": (
+                    self.sentinel_job.job_def.job_definition_name
+                ),
             },
             layers=[self.powertools_layer],
             bundling=lambda_python.BundlingOptions(
@@ -413,37 +383,114 @@ class HlsStack(Stack):
             ),
         )
 
-        self.granule_entry_queue.grant_consume_messages(self.granule_entry_lambda)
-        self.processing_bucket.grant_read_write(self.granule_entry_lambda)
-        self.aux_data_bucket.grant_read_write(self.granule_entry_lambda)
+        self.granule_init_queue.grant_consume_messages(self.granule_init_lambda)
+        self.processing_bucket.grant_read_write(self.granule_init_lambda)
+        self.sentinel_bucket.grant_read(self.granule_init_lambda)
+        self.aux_data_bucket.grant_read(self.granule_init_lambda)
 
-        self.granule_entry_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                resources=[
-                    self.batch_infra.queue.job_queue_arn,
-                    self.fmask_job.job_def_arn_without_revision,
-                ],
-                actions=[
-                    "batch:SubmitJob",
-                ],
-            )
-        )
-        self.granule_entry_lambda.add_to_role_policy(
+        self.granule_init_lambda.add_to_role_policy(self.batch_submit_job_policy)
+        self.granule_init_lambda.add_to_role_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 resources=["*"],
-                actions=[
-                    "batch:ListJobs",
-                ],
+                actions=["batch:ListJobs"],
             )
         )
 
-        # Granule queuer consumes from the granule queue
-        self.granule_entry_lambda.add_event_source_mapping(
-            "GranuleQueuerQueueTrigger",
-            batch_size=100,
-            max_batching_window=Duration.minutes(1),
+        self.granule_init_lambda.add_event_source_mapping(
+            "GranuleInitQueueTrigger",
+            batch_size=1,
+            max_batching_window=Duration.seconds(0),
             report_batch_item_failures=True,
-            event_source_arn=self.granule_entry_queue.queue_arn,
+            event_source_arn=self.granule_init_queue.queue_arn,
+        )
+
+        # ----------------------------------------------------------------------
+        # Ancillary-trigger Lambda (ancillary data arrives → submit AWAITING)
+        # Reserved concurrency = 1 prevents parallel scans on the same date.
+        # NOTE: S3 event notifications on the external aux data bucket must be
+        # configured separately (the bucket is not managed by this stack).
+        # ----------------------------------------------------------------------
+        self.ancillary_trigger_queue = sqs.Queue(
+            self,
+            "AncillaryTriggerQueue",
+            queue_name=settings.ANCILLARY_TRIGGER_QUEUE_NAME,
+            retention_period=Duration.days(14),
+            # Visibility longer than the Lambda timeout so a slow scan doesn't
+            # cause duplicate deliveries.
+            visibility_timeout=Duration.minutes(15),
+            enforce_ssl=True,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+        )
+
+        self.ancillary_trigger_lambda = lambda_python.PythonFunction(
+            self,
+            "AncillaryTriggerLambda",
+            entry="src/",
+            index="ancillary_trigger/handler.py",
+            handler="handler",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            memory_size=512,
+            timeout=Duration.minutes(10),
+            # Reserved concurrency = 1 ensures only one invocation scans a
+            # given dated AWAITING prefix at a time.
+            reserved_concurrent_executions=1,
+            environment={
+                "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
+                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
+                "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
+                "SENTINEL_JOB_DEFINITION_NAME": (
+                    self.sentinel_job.job_def.job_definition_name
+                ),
+                "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
+            },
+            layers=[self.powertools_layer],
+            bundling=lambda_python.BundlingOptions(
+                asset_excludes=LAMBDA_EXCLUDE,
+            ),
+        )
+
+        self.ancillary_trigger_queue.grant_consume_messages(
+            self.ancillary_trigger_lambda
+        )
+        self.processing_bucket.grant_read_write(self.ancillary_trigger_lambda)
+        self.aux_data_bucket.grant_read(self.ancillary_trigger_lambda)
+
+        self.ancillary_trigger_lambda.add_to_role_policy(self.batch_submit_job_policy)
+        self.ancillary_trigger_lambda.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                resources=["*"],
+                actions=["batch:ListJobs"],
+            )
+        )
+
+        self.ancillary_trigger_lambda.add_event_source_mapping(
+            "AncillaryTriggerQueueTrigger",
+            batch_size=1,
+            max_batching_window=Duration.seconds(0),
+            report_batch_item_failures=True,
+            event_source_arn=self.ancillary_trigger_queue.queue_arn,
+        )
+
+    def _make_bucket(self, construct_id: str, bucket_name: str) -> s3.Bucket:
+        """Create a stack-managed S3 bucket with standard settings.
+
+        Applies S3-managed encryption, SSL-only access policy, and lifecycle
+        rules to expire delete markers and abort incomplete multipart uploads.
+        """
+        return s3.Bucket(
+            self,
+            construct_id,
+            bucket_name=bucket_name,
+            removal_policy=RemovalPolicy.DESTROY,
+            enforce_ssl=True,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            lifecycle_rules=[
+                s3.LifecycleRule(expired_object_delete_marker=True),
+                s3.LifecycleRule(
+                    abort_incomplete_multipart_upload_after=Duration.days(1),
+                    noncurrent_version_expiration=Duration.days(1),
+                ),
+            ],
         )

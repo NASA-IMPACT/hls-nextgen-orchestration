@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum, auto, unique
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mypy_boto3_batch.type_defs import KeyValuePairTypeDef
+
+EXIT_CODE_LOW_SUN_ANGLE = 3
+EXIT_CODE_CLOUDY = 4
+
+TERMINAL_STATES: frozenset[ProcessingState]
 
 
 @unique
@@ -15,43 +20,20 @@ class ProcessingState(Enum):
     """Potential state for granule processing"""
 
     SUCCESS = auto()
+    CLOUDY = auto()
+    LOW_SUN_ANGLE = auto()
     FAILURE_RETRYABLE = auto()
     FAILURE_NONRETRYABLE = auto()
     AWAITING = auto()
     SUBMITTED = auto()
 
-    def previous_states(self) -> tuple[ProcessingState, ...]:
-        """Possible previous states in processing state machine"""
-        match self:
-            case ProcessingState.AWAITING:
-                return ()
-            case ProcessingState.SUBMITTED:
-                return (ProcessingState.AWAITING,)
-            case ProcessingState.FAILURE_NONRETRYABLE:
-                return (ProcessingState.SUBMITTED,)
-            case ProcessingState.FAILURE_RETRYABLE:
-                return (ProcessingState.SUBMITTED,)
-            case ProcessingState.SUCCESS:
-                return (
-                    ProcessingState.SUBMITTED,
-                    ProcessingState.FAILURE_NONRETRYABLE,
-                    ProcessingState.FAILURE_RETRYABLE,
-                )
-
-    def migrate_logs_to_state(self) -> ProcessingState | None:
-        """Whether to copy logs for this state to another state"""
-        if (
-            self == ProcessingState.FAILURE_NONRETRYABLE
-            or self == ProcessingState.FAILURE_RETRYABLE
-        ):
-            return ProcessingState.SUCCESS
-        else:
-            return None
-
-
-class ProcessingStep(Enum):
-    CLOUD_MASKING = auto()
-    ATMOSPHERIC_COMPENSATION = auto()
+    def is_terminal(self) -> bool:
+        return self in (
+            ProcessingState.SUCCESS,
+            ProcessingState.CLOUDY,
+            ProcessingState.LOW_SUN_ANGLE,
+            ProcessingState.FAILURE_NONRETRYABLE,
+        )
 
 
 HLS_GRANULE_ID_STRFTIME = "%Y%jT%H%M%S"
@@ -103,32 +85,35 @@ class GranuleId:
 class GranuleProcessingEvent:
     """Event message for granule processing jobs"""
 
-    granule_id: str
-    source_granule_id: str
+    workflow: str
+    acquisition_date: str  # YYYY-MM-DD
+    source_granule_ids: list[str] = field(default_factory=list)
+    output_granule_id: str = ""
     attempt: int = 0
-    # Events _may_ contain a reference to a debug bucket if the job was
-    # submitted in debug mode.
     debug_bucket: str | None = None
 
     def new_attempt(self) -> GranuleProcessingEvent:
         """Return a new GranuleProcessingEvent for another attempt"""
         return GranuleProcessingEvent(
-            granule_id=self.granule_id,
-            source_granule_id=self.source_granule_id,
+            workflow=self.workflow,
+            acquisition_date=self.acquisition_date,
+            source_granule_ids=list(self.source_granule_ids),
+            output_granule_id=self.output_granule_id,
             attempt=self.attempt + 1,
             debug_bucket=self.debug_bucket,
         )
 
     def to_envvar(self) -> dict[str, str]:
-        """Convert this event to environment variable"""
-        envvars = {
-            "GRANULE_ID": self.granule_id,
+        """Convert this event to environment variables"""
+        envvars: dict[str, str] = {
+            "WORKFLOW": self.workflow,
+            "ACQUISITION_DATE": self.acquisition_date,
+            "SOURCE_GRANULE_IDS": ",".join(self.source_granule_ids),
+            "OUTPUT_GRANULE_ID": self.output_granule_id,
             "ATTEMPT": str(self.attempt),
         }
         if self.debug_bucket:
             envvars["DEBUG_BUCKET"] = self.debug_bucket
-        if self.source_granule_id:
-            envvars["SOURCE_GRANULE_ID"] = self.source_granule_id
         return envvars
 
     @classmethod
@@ -141,9 +126,11 @@ class GranuleProcessingEvent:
             Raised if the expected keys aren't in the envvars provided
         """
         return cls(
-            granule_id=env["GRANULE_ID"],
+            workflow=env["WORKFLOW"],
+            acquisition_date=env["ACQUISITION_DATE"],
+            source_granule_ids=env["SOURCE_GRANULE_IDS"].split(","),
+            output_granule_id=env["OUTPUT_GRANULE_ID"],
             attempt=int(env["ATTEMPT"]),
-            source_granule_id=str(env["SOURCE_GRANULE_ID"]),
             debug_bucket=env.get("DEBUG_BUCKET"),
         )
 
@@ -158,8 +145,10 @@ class GranuleProcessingEvent:
         """Load from a JSON string"""
         data = json.loads(json_str)
         return cls(
-            granule_id=data["granule_id"],
-            source_granule_id=data["source_granule_id"],
+            workflow=data["workflow"],
+            acquisition_date=data["acquisition_date"],
+            source_granule_ids=data["source_granule_ids"],
+            output_granule_id=data["output_granule_id"],
             attempt=data["attempt"],
             debug_bucket=data.get("debug_bucket"),
         )

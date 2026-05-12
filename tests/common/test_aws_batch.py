@@ -1,8 +1,9 @@
 import datetime as dt
+from collections.abc import Iterator
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Iterator
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -10,13 +11,12 @@ from mypy_boto3_batch import BatchClient
 from mypy_boto3_batch.type_defs import JobDetailTypeDef
 from pytest_lazy_fixtures import lf
 
-from common import GranuleProcessingEvent, ProcessingState
+from common import ProcessingState
 from common.aws_batch import AwsBatchClient, JobDetails
+from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR, SAFE_ID
 
 
-class TestJobDetail:
-    """Tests for JobDetail"""
-
+class TestJobDetails:
     @pytest.mark.parametrize(
         ["detail", "attempts"],
         [
@@ -25,9 +25,9 @@ class TestJobDetail:
         ],
     )
     def test_attempts(self, detail: JobDetailTypeDef, attempts: int) -> None:
-        job_detail = JobDetails(detail)
-        assert job_detail.job_attempts == attempts
-        assert job_detail.max_attempts == 3
+        jd = JobDetails(detail)
+        assert jd.job_attempts == attempts
+        assert jd.max_attempts == 3
 
     @pytest.mark.parametrize(
         ["detail", "exit_code"],
@@ -36,124 +36,165 @@ class TestJobDetail:
             (lf("job_detail_failed_spot"), None),
         ],
     )
-    def test_exit_code(self, detail: JobDetailTypeDef, exit_code: int) -> None:
-        job_detail = JobDetails(detail)
-        assert job_detail.exit_code == exit_code
+    def test_exit_code(self, detail: JobDetailTypeDef, exit_code: int | None) -> None:
+        assert JobDetails(detail).exit_code == exit_code
 
-    def test_get_job_state(self, job_detail_failed_error: JobDetailTypeDef) -> None:
-        """Test we correctly parse the job outcome"""
-        detail = job_detail_failed_error.copy()
-        detail["container"]["exitCode"] = 1
-        outcome = JobDetails(detail).get_job_state()
-        assert outcome == ProcessingState.FAILURE_NONRETRYABLE
+    def test_get_job_state_success(self, job_detail_success: JobDetailTypeDef) -> None:
+        assert JobDetails(job_detail_success).get_job_state() == ProcessingState.SUCCESS
 
-        detail = job_detail_failed_error.copy()
-        detail["container"]["exitCode"] = 0
-        outcome = JobDetails(detail).get_job_state()
-        assert outcome == ProcessingState.SUCCESS
+    def test_get_job_state_cloudy(self, job_detail_cloudy: JobDetailTypeDef) -> None:
+        assert JobDetails(job_detail_cloudy).get_job_state() == ProcessingState.CLOUDY
 
-        # SPOT interruption
-        detail = deepcopy(job_detail_failed_error)
-        del detail["container"]["exitCode"]
-        detail["statusReason"] = "Host EC2 (instance i-01225b700440f4809) terminated."
-        outcome = JobDetails(detail).get_job_state()
-        assert outcome == ProcessingState.FAILURE_RETRYABLE
+    def test_get_job_state_low_sun(self, job_detail_low_sun: JobDetailTypeDef) -> None:
+        state = JobDetails(job_detail_low_sun).get_job_state()
+        assert state == ProcessingState.LOW_SUN_ANGLE
 
-        # Cancelled job
-        detail = job_detail_failed_error.copy()
-        del detail["container"]["exitCode"]
-        detail["statusReason"] = "Manually cancelling this job"
-        outcome = JobDetails(detail).get_job_state()
-        assert outcome == ProcessingState.FAILURE_NONRETRYABLE
-
-    def test_get_granule_event_details(
+    def test_get_job_state_nonretryable(
         self, job_detail_failed_error: JobDetailTypeDef
     ) -> None:
-        """Test we correctly parse the job granule processing event details"""
-        detail = job_detail_failed_error.copy()
-        detail["container"]["environment"] = [
-            {"name": "GRANULE_ID", "value": "foo"},
-            {"name": "SOURCE_GRANULE_ID", "value": "bar"},
-            {"name": "ATTEMPT", "value": "0"},
-        ]
-        event_details = JobDetails(detail).get_granule_event()
-
-        assert event_details == GranuleProcessingEvent(
-            granule_id="foo", source_granule_id="bar", attempt=0
+        assert (
+            JobDetails(job_detail_failed_error).get_job_state()
+            == ProcessingState.FAILURE_NONRETRYABLE
         )
+
+    def test_get_job_state_retryable_spot(
+        self, job_detail_failed_spot: JobDetailTypeDef
+    ) -> None:
+        assert (
+            JobDetails(job_detail_failed_spot).get_job_state()
+            == ProcessingState.FAILURE_RETRYABLE
+        )
+
+    def test_get_job_state_cancelled(
+        self, job_detail_failed_error: JobDetailTypeDef
+    ) -> None:
+        detail = deepcopy(job_detail_failed_error)
+        del detail["container"]["exitCode"]
+        detail["statusReason"] = "Manually cancelled"
+        state = JobDetails(detail).get_job_state()
+        assert state == ProcessingState.FAILURE_NONRETRYABLE
+
+    def test_is_phase1_job(self, job_detail_success: JobDetailTypeDef) -> None:
+        assert JobDetails(job_detail_success).is_phase1_job()
+
+    def test_is_not_phase1_job_shadow(self) -> None:
+        from tests.conftest import _make_job_detail
+
+        detail = _make_job_detail(
+            exit_code=0,
+            env=[
+                {"name": "GRANULE_LIST", "value": SAFE_ID},
+                {"name": "ATTEMPT", "value": "0"},
+            ],
+        )
+        assert not JobDetails(detail).is_phase1_job()
+
+    def test_get_granule_event_phase1(
+        self, job_detail_success: JobDetailTypeDef
+    ) -> None:
+        event = JobDetails(job_detail_success).get_granule_event()
+        assert event.workflow == "sentinel"
+        assert event.acquisition_date == ACQUISITION_DATE
+        assert event.source_granule_ids == [SAFE_ID]
+        assert event.output_granule_id == GRANULE_ID_STR
+        assert event.attempt == 0
+
+    def test_get_shadow_granule_event_sentinel(self) -> None:
+        from tests.conftest import _make_job_detail
+
+        detail = _make_job_detail(
+            exit_code=0,
+            env=[
+                {"name": "GRANULE_LIST", "value": SAFE_ID},
+                {"name": "ATTEMPT", "value": "0"},
+            ],
+        )
+        event = JobDetails(detail).get_shadow_granule_event()
+        assert event.workflow == "sentinel"
+        assert event.source_granule_ids == [SAFE_ID]
+        assert event.output_granule_id == GRANULE_ID_STR
+
+    def test_get_shadow_granule_event_landsat_ac(self) -> None:
+        from tests.conftest import _make_job_detail
+
+        detail = _make_job_detail(
+            exit_code=0,
+            env=[
+                {"name": "GRANULE", "value": "LC08_L1TP_043033_20210601"},
+                {"name": "ATTEMPT", "value": "0"},
+            ],
+        )
+        event = JobDetails(detail).get_shadow_granule_event()
+        assert event.workflow == "landsat-ac"
+        assert event.source_granule_ids == ["LC08_L1TP_043033_20210601"]
+
+    def test_get_shadow_granule_event_landsat_tile(self) -> None:
+        from tests.conftest import _make_job_detail
+
+        detail = _make_job_detail(
+            exit_code=0,
+            env=[
+                {"name": "MGRS", "value": "T18TYN"},
+                {"name": "PATHROW_LIST", "value": "043033,043034"},
+                {"name": "ATTEMPT", "value": "0"},
+            ],
+        )
+        event = JobDetails(detail).get_shadow_granule_event()
+        assert event.workflow == "landsat-tile"
+        assert "T18TYN" in event.output_granule_id
+        assert len(event.source_granule_ids) == 2
+
+    def test_created_at_stopped_at(self, job_detail_success: JobDetailTypeDef) -> None:
+        jd = JobDetails(job_detail_success)
+        # Just assert they return ISO strings
+        assert "T" in jd.created_at
+        assert "T" in jd.stopped_at
 
 
 def make_job_summary_list(count: int, status: str) -> list[dict[str, Any]]:
-    """Return an example `list-jobs` response for some status"""
     jobs = []
     for _ in range(count):
         job_id = str(uuid4())
-        job_info = {
+        job_info: dict[str, Any] = {
             "jobArn": f"arn:aws:batch:us-west-2:123456789012:job/{job_id}",
             "jobId": job_id,
-            "jobName": "BatchJobNotification",
+            "jobName": "test-job",
             "createdAt": (dt.datetime.now() - dt.timedelta(hours=1)).timestamp(),
             "status": status,
             "container": {},
         }
-
-        if status == "RUNNING":
-            job_info["startedAt"] = (
-                dt.datetime.now() - dt.timedelta(minutes=15)
-            ).timestamp()
-
         jobs.append(job_info)
-
     return [{"jobSummaryList": jobs}]
 
 
 @dataclass
 class MockListJobsPaginator:
-    """Mock paginating through AWS Batch ListJobs"""
-
     count_by_status: dict[str, int]
 
     def paginate(self, *, jobStatus: str, **kwds: Any) -> Iterator[dict[str, Any]]:
-        """Yield pages of ListJobs responses"""
         count = self.count_by_status.get(jobStatus, 0)
         yield from make_job_summary_list(count=count, status=jobStatus)
 
 
 class TestAwsBatchClient:
-    """Tests for AwsBatchClient"""
-
     @pytest.fixture
     def client(self, batch: BatchClient) -> AwsBatchClient:
-        """A basic fake AwsBatchClient"""
         return AwsBatchClient(
             queue="batch-queue", job_definition="job-definition", client=batch
         )
 
-    def make_mock_list_jobs_paginator(
-        self, client: AwsBatchClient, count_by_status: dict[str, int]
-    ) -> Iterator[MagicMock]:
-        """Create a fake ListJobs paginator"""
-        with patch.object(
-            client.client,
-            "get_paginator",
-            return_value=MockListJobsPaginator(count_by_status),
-        ) as mocked_get_paginator:
-            yield mocked_get_paginator
-
-    def test_active_jobs_below_threshold(self, client: AwsBatchClient) -> None:
-        """Test checking if active jobs are below threshold"""
+    def test_active_jobs_below_threshold_true(self, client: AwsBatchClient) -> None:
         with patch.object(
             client.client,
             "get_paginator",
             return_value=MockListJobsPaginator({"SUBMITTED": 10, "RUNNING": 5}),
-        ) as mocked_get_paginator:
+        ):
             assert client.active_jobs_below_threshold(200)
-        mocked_get_paginator.assert_called()
 
+    def test_active_jobs_below_threshold_false(self, client: AwsBatchClient) -> None:
         with patch.object(
             client.client,
             "get_paginator",
             return_value=MockListJobsPaginator({"SUBMITTED": 10, "RUNNING": 5}),
-        ) as mocked_get_paginator:
+        ):
             assert not client.active_jobs_below_threshold(5)
-        mocked_get_paginator.assert_called()

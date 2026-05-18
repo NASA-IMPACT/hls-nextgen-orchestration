@@ -91,8 +91,8 @@ class BatchJob(Construct):
         if ecr_parsed:
             repo_arn, image_tag = ecr_parsed
             ecr_repo = ecr.Repository.from_repository_arn(self, "EcrRepo", repo_arn)
-            container_image: ecs.ContainerImage = ecs.ContainerImage.from_ecr_repository(
-                ecr_repo, tag=image_tag
+            container_image: ecs.ContainerImage = (
+                ecs.ContainerImage.from_ecr_repository(ecr_repo, tag=image_tag)
             )
         else:
             container_image = ecs.ContainerImage.from_registry(container_ecr_uri)

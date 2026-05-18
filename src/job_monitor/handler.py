@@ -120,29 +120,33 @@ def job_monitor(
             state=state,
         )
 
-    if state == ProcessingState.FAILURE_RETRYABLE:
-        if details.job_attempts == details.max_attempts:
+    if not shadow:
+        if state == ProcessingState.FAILURE_RETRYABLE:
+            if details.job_attempts == details.max_attempts:
+                sqs.send_message(
+                    QueueUrl=retry_queue_url,
+                    MessageBody=event.to_json(),
+                    MessageAttributes={
+                        "FailureType": {
+                            "StringValue": "RETRYABLE",
+                            "DataType": "String",
+                        }
+                    },
+                )
+            else:
+                logger.info(
+                    "Retryable failure attempt=%d/%d; AWS Batch will retry internally.",
+                    details.job_attempts,
+                    details.max_attempts,
+                )
+        elif state == ProcessingState.FAILURE_NONRETRYABLE:
             sqs.send_message(
-                QueueUrl=retry_queue_url,
+                QueueUrl=failure_dlq_url,
                 MessageBody=event.to_json(),
                 MessageAttributes={
-                    "FailureType": {"StringValue": "RETRYABLE", "DataType": "String"}
+                    "FailureType": {"StringValue": "NONRETRYABLE", "DataType": "String"}
                 },
             )
-        else:
-            logger.info(
-                "Retryable failure attempt=%d/%d; AWS Batch will retry internally.",
-                details.job_attempts,
-                details.max_attempts,
-            )
-    elif state == ProcessingState.FAILURE_NONRETRYABLE:
-        sqs.send_message(
-            QueueUrl=failure_dlq_url,
-            MessageBody=event.to_json(),
-            MessageAttributes={
-                "FailureType": {"StringValue": "NONRETRYABLE", "DataType": "String"}
-            },
-        )
 
 
 def handler(event: JobChangeEvent, context: Any) -> None:

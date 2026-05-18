@@ -284,6 +284,8 @@ class HlsStack(Stack):
             ],
         )
 
+        self._setup_phase0_shadow(settings)
+
         # ----------------------------------------------------------------------
         # Job requeuer
         # ----------------------------------------------------------------------
@@ -511,6 +513,44 @@ class HlsStack(Stack):
             max_batching_window=Duration.seconds(0),
             report_batch_item_failures=True,
             event_source_arn=self.ancillary_submit_queue.queue_arn,
+        )
+
+    def _setup_phase0_shadow(self, settings: StackSettings) -> None:
+        """Wire up Phase 0 shadow observability against the existing system.
+
+        Adds an EventBridge rule that routes completed Batch jobs from the existing
+        queue/job-definition to the same job_monitor Lambda, which writes shadow=True
+        canonical records. Delete or disable this method once Phase 1 is fully deployed.
+        """
+        if not (
+            settings.PHASE0_BATCH_QUEUE_ARN
+            and settings.PHASE0_SENTINEL_JOB_DEFINITION_NAME
+        ):
+            return
+
+        self.phase0_job_events_rule = events.Rule(
+            self,
+            "Phase0JobEventsRule",
+            event_pattern=events.EventPattern(
+                source=["aws.batch"],
+                detail={
+                    "jobQueue": [settings.PHASE0_BATCH_QUEUE_ARN],
+                    "jobDefinition": [
+                        {
+                            "wildcard": (
+                                f"*{settings.PHASE0_SENTINEL_JOB_DEFINITION_NAME}*"
+                            )
+                        }
+                    ],
+                    "status": ["FAILED", "SUCCEEDED"],
+                },
+            ),
+            targets=[
+                events_targets.LambdaFunction(
+                    handler=self.job_monitor_lambda,
+                    retry_attempts=3,
+                )
+            ],
         )
 
     def _make_bucket(self, construct_id: str, bucket_name: str) -> s3.Bucket:

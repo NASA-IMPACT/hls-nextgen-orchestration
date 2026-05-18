@@ -150,3 +150,33 @@ class StackSettings(BaseSettings):
     ATHENA_STATE_TABLE_START_DATETIME: dt.datetime = dt.datetime(2026, 5, 1)
     ATHENA_STATE_TABLE_NAME: str = "state_inventory"
     ATHENA_STATE_VIEW_NAME: str = "current_granule_states"
+
+    # ----- Phase 0 shadow observability (Sentinel-2 only)
+    # Set these to shadow the existing Step Functions Sentinel-2 AC Batch jobs.
+    # Landsat (AC + tile) is out of scope for Phase 0.
+    # Both must be set together or not at all.
+    PHASE0_BATCH_QUEUE_ARN: str | None = None
+    PHASE0_SENTINEL_JOB_DEFINITION_NAME: str | None = None
+
+    @model_validator(mode="after")
+    def validate_phase0_settings(self) -> "StackSettings":
+        defined = [
+            k
+            for k, v in {
+                "PHASE0_BATCH_QUEUE_ARN": self.PHASE0_BATCH_QUEUE_ARN,
+                "PHASE0_SENTINEL_JOB_DEFINITION_NAME": (
+                    self.PHASE0_SENTINEL_JOB_DEFINITION_NAME
+                ),
+            }.items()
+            if v is not None
+        ]
+        if defined and len(defined) != 2:
+            missing = {
+                "PHASE0_BATCH_QUEUE_ARN",
+                "PHASE0_SENTINEL_JOB_DEFINITION_NAME",
+            } - set(defined)
+            raise ValueError(
+                f"Partial Phase 0 configuration: {sorted(defined)} are set but "
+                f"{sorted(missing)} are missing. Set both or neither."
+            )
+        return self

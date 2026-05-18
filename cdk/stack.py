@@ -4,7 +4,6 @@ from aws_cdk import (
     Duration,
     RemovalPolicy,
     Stack,
-    aws_batch as batch,
     aws_ec2 as ec2,
     aws_events as events,
     aws_events_targets as events_targets,
@@ -13,8 +12,6 @@ from aws_cdk import (
     aws_lambda_python_alpha as lambda_python,
     aws_s3 as s3,
     aws_s3_notifications as s3_notifications,
-    aws_sns as sns,
-    aws_sns_subscriptions as sns_subscriptions,
     aws_sqs as sqs,
 )
 from constructs import Construct
@@ -24,6 +21,8 @@ from hls_constructs import (
     AthenaStateDatabase,
     BatchInfra,
     BatchJob,
+    ProcessingBucket,
+    QueueWithDlq,
 )
 from settings import StackSettings
 
@@ -75,9 +74,14 @@ class HlsStack(Stack):
             bucket_name=settings.AUX_DATA_BUCKET_NAME,
         )
 
-        self.processing_bucket = self._make_bucket(
-            "ProcessingBucket", settings.PROCESSING_BUCKET_NAME
+        _processing = ProcessingBucket(
+            self,
+            "ProcessingBucket",
+            bucket_name=settings.PROCESSING_BUCKET_NAME,
+            state_inventory_prefix=settings.STATE_INVENTORY_PREFIX,
         )
+        self.processing_bucket = _processing.bucket
+
         # FIXME: this bucket already exists, so import it post-MVP
         self.output_bucket = self._make_bucket(
             "OutputBucket", settings.OUTPUT_BUCKET_NAME
@@ -96,38 +100,6 @@ class HlsStack(Stack):
             )
         else:
             self.debug_bucket = None
-
-        # ----------------------------------------------------------------------
-        # S3 inventory: state/ prefix → feeds AthenaStateDatabase
-        # ----------------------------------------------------------------------
-        self.processing_bucket.add_inventory(
-            enabled=True,
-            destination=s3.InventoryDestination(
-                bucket=self.processing_bucket,
-                prefix=settings.STATE_INVENTORY_PREFIX.rstrip("/"),
-            ),
-            inventory_id="state-pointers",
-            format=s3.InventoryFormat.PARQUET,
-            frequency=s3.InventoryFrequency.DAILY,
-            objects_prefix="state/",
-            optional_fields=["LastModifiedDate"],
-        )
-        self.processing_bucket.add_lifecycle_rule(
-            prefix=settings.STATE_INVENTORY_PREFIX,
-            expiration=Duration.days(14),
-        )
-        self.processing_bucket.add_to_resource_policy(
-            iam.PolicyStatement(
-                actions=["s3:PutObject"],
-                resources=[
-                    self.processing_bucket.arn_for_objects(
-                        f"{settings.STATE_INVENTORY_PREFIX}*"
-                    ),
-                ],
-                principals=[iam.ServicePrincipal("s3.amazonaws.com")],
-                effect=iam.Effect.ALLOW,
-            )
-        )
 
         # ----------------------------------------------------------------------
         # Athena databases
@@ -170,8 +142,6 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # HLS processing compute jobs
         # ----------------------------------------------------------------------
-        secrets: dict[str, batch.Secret] = {}
-
         self.sentinel_job = BatchJob(
             self,
             "SentinelJob",
@@ -186,7 +156,7 @@ class HlsStack(Stack):
                 "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
                 "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
             },
-            secrets=secrets,
+            secrets={},
             stage=settings.STAGE,
         )
 
@@ -207,29 +177,25 @@ class HlsStack(Stack):
         )
 
         # ----------------------------------------------------------------------
-        # Job monitor & retry system
+        # Common AWS Lambda
         # ----------------------------------------------------------------------
-        self.job_failure_dlq = sqs.Queue(
+        # FIXME: this needs to be tied to Python version & cpu arch
+        self.powertools_layer = lambda_.LayerVersion.from_layer_version_arn(
             self,
-            "JobRetryFailureDLQ",
-            queue_name=settings.JOB_FAILURE_DLQ_NAME,
-            retention_period=Duration.days(14),
-            enforce_ssl=True,
-            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            "PowertoolsLayer",
+            layer_version_arn=f"arn:aws:lambda:{self.region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-x86_64:18",
         )
 
-        self.job_retry_queue = sqs.Queue(
+        # ----------------------------------------------------------------------
+        # Job monitor & retry system
+        # ----------------------------------------------------------------------
+        self.job_retry = QueueWithDlq(
             self,
-            "JobRetryFailureQueue",
+            "JobRetryQueue",
             queue_name=settings.JOB_RETRY_QUEUE_NAME,
-            dead_letter_queue=sqs.DeadLetterQueue(
-                queue=self.job_failure_dlq,
-                max_receive_count=1,
-            ),
-            retention_period=Duration.days(14),
+            dlq_name=settings.JOB_FAILURE_DLQ_NAME,
             visibility_timeout=Duration.minutes(2),
-            enforce_ssl=True,
-            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            max_receive_count=1,
         )
 
         self.job_monitor_lambda = lambda_python.PythonFunction(
@@ -244,8 +210,8 @@ class HlsStack(Stack):
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
-                "JOB_RETRY_QUEUE_URL": self.job_retry_queue.queue_url,
-                "JOB_FAILURE_DLQ_URL": self.job_failure_dlq.queue_url,
+                "JOB_RETRY_QUEUE_URL": self.job_retry.queue.queue_url,
+                "JOB_FAILURE_DLQ_URL": self.job_retry.dlq.queue_url,
                 "PROCESSING_JOB_RETRY_ATTEMPTS": str(
                     settings.PROCESSING_JOB_RETRY_ATTEMPTS
                 ),
@@ -255,8 +221,8 @@ class HlsStack(Stack):
             ),
         )
         self.processing_bucket.grant_read_write(self.job_monitor_lambda)
-        self.job_retry_queue.grant_send_messages(self.job_monitor_lambda)
-        self.job_failure_dlq.grant_send_messages(self.job_monitor_lambda)
+        self.job_retry.queue.grant_send_messages(self.job_monitor_lambda)
+        self.job_retry.dlq.grant_send_messages(self.job_monitor_lambda)
 
         # EventBridge rule: Batch job state changes from our queue/job definition
         self.processing_job_events_rule = events.Rule(
@@ -313,29 +279,19 @@ class HlsStack(Stack):
 
         self.job_requeuer_lambda.add_to_role_policy(self.batch_submit_job_policy)
         self.processing_bucket.grant_read_write(self.job_requeuer_lambda)
-        self.job_retry_queue.grant_consume_messages(self.job_requeuer_lambda)
+        self.job_retry.queue.grant_consume_messages(self.job_requeuer_lambda)
 
         self.job_requeuer_lambda.add_event_source_mapping(
             "JobRequeuerRetryQueueTrigger",
             batch_size=100,
             max_batching_window=Duration.minutes(1),
             report_batch_item_failures=True,
-            event_source_arn=self.job_retry_queue.queue_arn,
+            event_source_arn=self.job_retry.queue.queue_arn,
         )
 
         # ----------------------------------------------------------------------
         # Granule-init Lambda (Sentinel-2 arrival → AWAITING or SUBMITTED)
         # ----------------------------------------------------------------------
-        self.sentinel_topic = sns.Topic(
-            self,
-            "SentinelTopic",
-        )
-
-        self.sentinel_bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3_notifications.SnsDestination(self.sentinel_topic),
-        )
-
         self.granule_init_queue = sqs.Queue(
             self,
             "GranuleInitQueue",
@@ -343,14 +299,9 @@ class HlsStack(Stack):
             visibility_timeout=Duration.minutes(10),
         )
 
-        self.sentinel_topic.add_subscription(
-            sns_subscriptions.SqsSubscription(self.granule_init_queue)
-        )
-
-        self.powertools_layer = lambda_.LayerVersion.from_layer_version_arn(
-            self,
-            "PowertoolsLayer",
-            layer_version_arn=f"arn:aws:lambda:{self.region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-x86_64:18",
+        self.sentinel_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3_notifications.SqsDestination(self.granule_init_queue),
         )
 
         self.granule_init_lambda = lambda_python.PythonFunction(
@@ -419,27 +370,13 @@ class HlsStack(Stack):
         # Internal queue: one message per AWAITING granule, consumed by the
         # submit Lambda. Separate from the trigger queue so it can be alarmed
         # on independently and scaled without affecting S3 event delivery.
-        self.ancillary_submit_dlq = sqs.Queue(
-            self,
-            "AncillarySubmitDLQ",
-            queue_name=settings.ANCILLARY_SUBMIT_DLQ_NAME,
-            retention_period=Duration.days(14),
-            enforce_ssl=True,
-            encryption=sqs.QueueEncryption.SQS_MANAGED,
-        )
-
-        self.ancillary_submit_queue = sqs.Queue(
+        self.ancillary_submit = QueueWithDlq(
             self,
             "AncillarySubmitQueue",
             queue_name=settings.ANCILLARY_SUBMIT_QUEUE_NAME,
-            retention_period=Duration.days(14),
+            dlq_name=settings.ANCILLARY_SUBMIT_DLQ_NAME,
             visibility_timeout=Duration.minutes(2),
-            dead_letter_queue=sqs.DeadLetterQueue(
-                queue=self.ancillary_submit_dlq,
-                max_receive_count=3,
-            ),
-            enforce_ssl=True,
-            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            max_receive_count=3,
         )
 
         self.ancillary_trigger_lambda = lambda_python.PythonFunction(
@@ -453,7 +390,7 @@ class HlsStack(Stack):
             timeout=Duration.minutes(2),
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
-                "ANCILLARY_SUBMIT_QUEUE_URL": self.ancillary_submit_queue.queue_url,
+                "ANCILLARY_SUBMIT_QUEUE_URL": self.ancillary_submit.queue.queue_url,
             },
             layers=[self.powertools_layer],
             bundling=lambda_python.BundlingOptions(
@@ -465,7 +402,7 @@ class HlsStack(Stack):
             self.ancillary_trigger_lambda
         )
         self.processing_bucket.grant_read(self.ancillary_trigger_lambda)
-        self.ancillary_submit_queue.grant_send_messages(self.ancillary_trigger_lambda)
+        self.ancillary_submit.queue.grant_send_messages(self.ancillary_trigger_lambda)
 
         self.ancillary_trigger_lambda.add_event_source_mapping(
             "AncillaryTriggerQueueTrigger",
@@ -502,7 +439,7 @@ class HlsStack(Stack):
             ),
         )
 
-        self.ancillary_submit_queue.grant_consume_messages(self.ancillary_submit_lambda)
+        self.ancillary_submit.queue.grant_consume_messages(self.ancillary_submit_lambda)
         self.processing_bucket.grant_read_write(self.ancillary_submit_lambda)
         self.aux_data_bucket.grant_read(self.ancillary_submit_lambda)
         self.ancillary_submit_lambda.add_to_role_policy(self.batch_submit_job_policy)
@@ -512,7 +449,7 @@ class HlsStack(Stack):
             batch_size=1,
             max_batching_window=Duration.seconds(0),
             report_batch_item_failures=True,
-            event_source_arn=self.ancillary_submit_queue.queue_arn,
+            event_source_arn=self.ancillary_submit.queue.queue_arn,
         )
 
     def _setup_phase0_shadow(self, settings: StackSettings) -> None:

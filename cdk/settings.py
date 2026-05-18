@@ -161,22 +161,9 @@ class StackSettings(BaseSettings):
     @model_validator(mode="after")
     def validate_phase0_settings(self) -> "StackSettings":
         defined = [
-            k
-            for k, v in {
-                "PHASE0_BATCH_QUEUE_ARN": self.PHASE0_BATCH_QUEUE_ARN,
-                "PHASE0_SENTINEL_JOB_DEFINITION_NAME": (
-                    self.PHASE0_SENTINEL_JOB_DEFINITION_NAME
-                ),
-            }.items()
-            if v is not None
+            getattr(self, k, None) is not None
+            for k in ("PHASE0_BATCH_QUEUE_ARN", "PHASE0_SENTINEL_JOB_DEFINITION_NAME")
         ]
-        if defined and len(defined) != 2:
-            missing = {
-                "PHASE0_BATCH_QUEUE_ARN",
-                "PHASE0_SENTINEL_JOB_DEFINITION_NAME",
-            } - set(defined)
-            raise ValueError(
-                f"Partial Phase 0 configuration: {sorted(defined)} are set but "
-                f"{sorted(missing)} are missing. Set both or neither."
-            )
+        if any(defined) and not all(defined):
+            raise ValueError("Partial Phase 0 configuration. Set all or nothing.")
         return self

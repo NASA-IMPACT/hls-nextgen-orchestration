@@ -66,12 +66,6 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         self.vpc = ec2.Vpc.from_lookup(self, "VPC", vpc_id=settings.VPC_ID)
 
-        if settings.STAGE == "prod":
-            self.vpc.add_gateway_endpoint(
-                "S3",
-                service=ec2.GatewayVpcEndpointAwsService.S3,
-            )
-
         # ----------------------------------------------------------------------
         # Buckets
         # ----------------------------------------------------------------------
@@ -406,8 +400,7 @@ class HlsStack(Stack):
         )
 
         # ----------------------------------------------------------------------
-        # Ancillary-trigger Lambda (ancillary data arrives → submit AWAITING)
-        # Reserved concurrency = 1 prevents parallel scans on the same date.
+        # Ancillary-trigger Lambda (ancillary data arrives → fan-out per granule)
         # NOTE: S3 event notifications on the external aux data bucket must be
         # configured separately (the bucket is not managed by this stack).
         # ----------------------------------------------------------------------
@@ -416,9 +409,33 @@ class HlsStack(Stack):
             "AncillaryTriggerQueue",
             queue_name=settings.ANCILLARY_TRIGGER_QUEUE_NAME,
             retention_period=Duration.days(14),
-            # Visibility longer than the Lambda timeout so a slow scan doesn't
-            # cause duplicate deliveries.
-            visibility_timeout=Duration.minutes(15),
+            visibility_timeout=Duration.minutes(2),
+            enforce_ssl=True,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+        )
+
+        # Internal queue: one message per AWAITING granule, consumed by the
+        # submit Lambda. Separate from the trigger queue so it can be alarmed
+        # on independently and scaled without affecting S3 event delivery.
+        self.ancillary_submit_dlq = sqs.Queue(
+            self,
+            "AncillarySubmitDLQ",
+            queue_name=settings.ANCILLARY_SUBMIT_DLQ_NAME,
+            retention_period=Duration.days(14),
+            enforce_ssl=True,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+        )
+
+        self.ancillary_submit_queue = sqs.Queue(
+            self,
+            "AncillarySubmitQueue",
+            queue_name=settings.ANCILLARY_SUBMIT_QUEUE_NAME,
+            retention_period=Duration.days(14),
+            visibility_timeout=Duration.minutes(2),
+            dead_letter_queue=sqs.DeadLetterQueue(
+                queue=self.ancillary_submit_dlq,
+                max_receive_count=3,
+            ),
             enforce_ssl=True,
             encryption=sqs.QueueEncryption.SQS_MANAGED,
         )
@@ -430,11 +447,44 @@ class HlsStack(Stack):
             index="ancillary_trigger/handler.py",
             handler="handler",
             runtime=lambda_.Runtime.PYTHON_3_12,
-            memory_size=512,
-            timeout=Duration.minutes(10),
-            # Reserved concurrency = 1 ensures only one invocation scans a
-            # given dated AWAITING prefix at a time.
-            reserved_concurrent_executions=1,
+            memory_size=256,
+            timeout=Duration.minutes(2),
+            environment={
+                "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
+                "ANCILLARY_SUBMIT_QUEUE_URL": self.ancillary_submit_queue.queue_url,
+            },
+            layers=[self.powertools_layer],
+            bundling=lambda_python.BundlingOptions(
+                asset_excludes=LAMBDA_EXCLUDE,
+            ),
+        )
+
+        self.ancillary_trigger_queue.grant_consume_messages(
+            self.ancillary_trigger_lambda
+        )
+        self.processing_bucket.grant_read(self.ancillary_trigger_lambda)
+        self.ancillary_submit_queue.grant_send_messages(self.ancillary_trigger_lambda)
+
+        self.ancillary_trigger_lambda.add_event_source_mapping(
+            "AncillaryTriggerQueueTrigger",
+            batch_size=1,
+            max_batching_window=Duration.seconds(0),
+            report_batch_item_failures=True,
+            event_source_arn=self.ancillary_trigger_queue.queue_arn,
+        )
+
+        # ----------------------------------------------------------------------
+        # Ancillary-submit Lambda (per-granule Batch submission)
+        # ----------------------------------------------------------------------
+        self.ancillary_submit_lambda = lambda_python.PythonFunction(
+            self,
+            "AncillarySubmitLambda",
+            entry="src/",
+            index="ancillary_submit/handler.py",
+            handler="handler",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            memory_size=256,
+            timeout=Duration.minutes(2),
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
@@ -450,27 +500,17 @@ class HlsStack(Stack):
             ),
         )
 
-        self.ancillary_trigger_queue.grant_consume_messages(
-            self.ancillary_trigger_lambda
-        )
-        self.processing_bucket.grant_read_write(self.ancillary_trigger_lambda)
-        self.aux_data_bucket.grant_read(self.ancillary_trigger_lambda)
+        self.ancillary_submit_queue.grant_consume_messages(self.ancillary_submit_lambda)
+        self.processing_bucket.grant_read_write(self.ancillary_submit_lambda)
+        self.aux_data_bucket.grant_read(self.ancillary_submit_lambda)
+        self.ancillary_submit_lambda.add_to_role_policy(self.batch_submit_job_policy)
 
-        self.ancillary_trigger_lambda.add_to_role_policy(self.batch_submit_job_policy)
-        self.ancillary_trigger_lambda.add_to_role_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                resources=["*"],
-                actions=["batch:ListJobs"],
-            )
-        )
-
-        self.ancillary_trigger_lambda.add_event_source_mapping(
-            "AncillaryTriggerQueueTrigger",
+        self.ancillary_submit_lambda.add_event_source_mapping(
+            "AncillarySubmitQueueTrigger",
             batch_size=1,
             max_batching_window=Duration.seconds(0),
             report_batch_item_failures=True,
-            event_source_arn=self.ancillary_trigger_queue.queue_arn,
+            event_source_arn=self.ancillary_submit_queue.queue_arn,
         )
 
     def _make_bucket(self, construct_id: str, bucket_name: str) -> s3.Bucket:

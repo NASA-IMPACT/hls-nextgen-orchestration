@@ -30,23 +30,28 @@ class StackSettings(BaseSettings):
                 data["STACK_NAME"] = f"hls-nextgen-orchestration-{stage}"
 
             if not data.get("ANCILLARY_TRIGGER_QUEUE_NAME"):
-                data["ANCILLARY_TRIGGER_QUEUE_NAME"] = f"hls-nextgen-orchestration-ancillary-queue-{stage}"
+                data["ANCILLARY_TRIGGER_QUEUE_NAME"] = (
+                    f"hls-orch-ancillary-queue-{stage}"
+                )
 
             if not data.get("ANCILLARY_SUBMIT_QUEUE_NAME"):
-                data["ANCILLARY_SUBMIT_QUEUE_NAME"] = f"hls-nextgen-orchestration-ancillary-submit-{stage}"
+                data["ANCILLARY_SUBMIT_QUEUE_NAME"] = (
+                    f"hls-orch-ancillary-submit-{stage}"
+                )
+
+            if not data.get("ANCILLARY_SUBMIT_DLQ_NAME"):
+                data["ANCILLARY_SUBMIT_DLQ_NAME"] = (
+                    f"hls-orch-ancillary-submit-dlq-{stage}"
+                )
 
             if not data.get("ATHENA_DATABASE_NAME"):
                 data["ATHENA_DATABASE_NAME"] = f"hls-nextgen-orchestration-{stage}"
 
             if not data.get("JOB_RETRY_QUEUE_NAME"):
-                data["JOB_RETRY_QUEUE_NAME"] = (
-                    f"hls-nextgen-orchestration-retry-{stage}"
-                )
+                data["JOB_RETRY_QUEUE_NAME"] = f"hls-orch-retry-{stage}"
 
             if not data.get("JOB_FAILURE_DLQ_NAME"):
-                data["JOB_FAILURE_DLQ_NAME"] = (
-                    f"hls-nextgen-orchestration-failure-{stage}"
-                )
+                data["JOB_FAILURE_DLQ_NAME"] = f"hls-orch-failure-{stage}"
 
             if not data.get("PROCESSING_LOG_GROUP_NAME"):
                 data["PROCESSING_LOG_GROUP_NAME"] = (
@@ -124,6 +129,10 @@ class StackSettings(BaseSettings):
     # ----- Ancillary trigger
     # SQS queue that receives S3 event notifications from the aux data bucket
     ANCILLARY_TRIGGER_QUEUE_NAME: str
+    # Internal SQS queue for per-granule submission work fanned out from the trigger
+    ANCILLARY_SUBMIT_QUEUE_NAME: str
+    # DLQ for the ancillary-submit queue
+    ANCILLARY_SUBMIT_DLQ_NAME: str
 
     # ----- State-pointer inventory (state/ prefix → daily S3 inventory)
     STATE_INVENTORY_PREFIX: Annotated[str, BeforeValidator(include_trailing_slash)] = (

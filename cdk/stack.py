@@ -141,7 +141,7 @@ class HlsStack(Stack):
         self.athena_records_db = AthenaRecordsDatabase(
             self,
             "AthenaRecordsDatabase",
-            database_name=settings.ATHENA_RECORDS_DATABASE_NAME,
+            database_name=settings.ATHENA_DATABASE_NAME,
             records_bucket_name=settings.PROCESSING_BUCKET_NAME,
             table_date_range_start=settings.ATHENA_RECORDS_TABLE_START_DATE,
             sentinel_table_name=settings.ATHENA_RECORDS_SENTINEL_TABLE_NAME,
@@ -150,7 +150,7 @@ class HlsStack(Stack):
         self.athena_state_db = AthenaStateDatabase(
             self,
             "AthenaStateDatabase",
-            database_name=settings.ATHENA_STATE_DATABASE_NAME,
+            database_name=settings.ATHENA_DATABASE_NAME,
             inventory_location_s3path=(
                 f"s3://{settings.PROCESSING_BUCKET_NAME}"
                 f"/{settings.STATE_INVENTORY_PREFIX}"

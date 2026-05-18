@@ -5,6 +5,7 @@ from aws_cdk import (
     Duration,
     Size,
     aws_batch as batch,
+    aws_ecr as ecr,
     aws_ecs as ecs,
     aws_iam as iam,
     aws_logs as logs,
@@ -12,28 +13,34 @@ from aws_cdk import (
 from constructs import Construct
 
 
-def ecr_uri_to_repo_arn(uri: str) -> str | None:
-    """Convert an ECR container URI to the ARN for the repository
+def _parse_ecr_uri(uri: str) -> tuple[str, str] | None:
+    """Parse a private ECR URI into (repo_arn, tag).
 
-    This returns "None" if the container URI is not in ECR (i.e., it's public)
-    since that has no ARN.
+    Returns None for public registries (no 'dkr' in host).
 
     Examples
     --------
-    >>> ecr_uri_to_repo_arn(
+    >>> _parse_ecr_uri(
     ...     "012345678901.dkr.ecr.us-west-2.amazonaws.com/my-repo:latest"
     ... )
-    arn:aws:ecr:us-west-2:012345678901:repository/my-repo
-    >>> ecr_uri_to_repo_arn("public.ecr.aws/amazonlinux/amazonlinux:latest")
+    ('arn:aws:ecr:us-west-2:012345678901:repository/my-repo', 'latest')
+    >>> _parse_ecr_uri("public.ecr.aws/amazonlinux/amazonlinux:latest")
     None
     """
     if "dkr" not in uri:
         return None
-
-    tagless = uri.split(":")[0]
-    dkr, repo = tagless.split("/")
-    account_id, _, _, region, _, _ = dkr.split(".")
-    return f"arn:aws:ecr:{region}:{account_id}:repository/{repo}"
+    # Strip digest reference if present, then split tag
+    base = uri.split("@")[0]
+    path_part = base.split("/", 1)[-1]
+    if ":" in path_part:
+        base, tag = base.rsplit(":", 1)
+    else:
+        tag = "latest"
+    host, repo_path = base.split("/", 1)
+    host_parts = host.split(".")
+    account_id, region = host_parts[0], host_parts[3]
+    repo_arn = f"arn:aws:ecr:{region}:{account_id}:repository/{repo_path}"
+    return repo_arn, tag
 
 
 class BatchJob(Construct):
@@ -62,8 +69,6 @@ class BatchJob(Construct):
             log_group_name=log_group_name,
         )
 
-        # Execution role needs ECR permissions to pull from private repo
-        # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html#ecr-required-iam-permissions
         execution_role = iam.Role(
             self,
             "ExecutionRole",
@@ -74,28 +79,6 @@ class BatchJob(Construct):
                 )
             ],
         )
-        execution_role.add_to_policy(
-            iam.PolicyStatement(
-                effect=iam.Effect.ALLOW,
-                resources=["*"],
-                actions=[
-                    "ecr:GetAuthorizationToken",
-                ],
-            )
-        )
-        if ecr_repo_arn := ecr_uri_to_repo_arn(container_ecr_uri):
-            execution_role.add_to_policy(
-                iam.PolicyStatement(
-                    effect=iam.Effect.ALLOW,
-                    resources=[
-                        ecr_repo_arn,
-                    ],
-                    actions=[
-                        "ecr:BatchGetImage",
-                        "ecr:GetDownloadUrlForLayer",
-                    ],
-                )
-            )
 
         self.role = iam.Role(
             self,
@@ -104,13 +87,23 @@ class BatchJob(Construct):
             role_name=f"hls-processing-role-{stage}",
         )
 
+        ecr_parsed = _parse_ecr_uri(container_ecr_uri)
+        if ecr_parsed:
+            repo_arn, image_tag = ecr_parsed
+            ecr_repo = ecr.Repository.from_repository_arn(self, "EcrRepo", repo_arn)
+            container_image: ecs.ContainerImage = ecs.ContainerImage.from_ecr_repository(
+                ecr_repo, tag=image_tag
+            )
+        else:
+            container_image = ecs.ContainerImage.from_registry(container_ecr_uri)
+
         self.job_def = batch.EcsJobDefinition(
             self,
             "JobDef",
             container=batch.EcsEc2ContainerDefinition(
                 self,
                 "BatchContainerDef",
-                image=ecs.ContainerImage.from_registry(container_ecr_uri),
+                image=container_image,
                 execution_role=execution_role,
                 job_role=self.role,
                 cpu=vcpu,

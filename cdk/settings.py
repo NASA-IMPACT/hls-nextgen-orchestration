@@ -1,7 +1,7 @@
 import datetime as dt
 from typing import Annotated, Any, Literal
 
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -17,6 +17,43 @@ class StackSettings(BaseSettings):
 
     STACK_NAME: str
     STAGE: Literal["dev", "prod"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_stage_defaults(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "STAGE" not in data:
+                raise ValueError("STAGE is required")
+            stage = data["STAGE"]
+
+            if not data.get("STACK_NAME"):
+                data["STACK_NAME"] = f"hls-nextgen-orchestration-{stage}"
+
+            if not data.get("ANCILLARY_TRIGGER_QUEUE_NAME"):
+                data["ANCILLARY_TRIGGER_QUEUE_NAME"] = f"hls-nextgen-orchestration-ancillary-queue-{stage}"
+
+            if not data.get("ANCILLARY_SUBMIT_QUEUE_NAME"):
+                data["ANCILLARY_SUBMIT_QUEUE_NAME"] = f"hls-nextgen-orchestration-ancillary-submit-{stage}"
+
+            if not data.get("ATHENA_DATABASE_NAME"):
+                data["ATHENA_DATABASE_NAME"] = f"hls-nextgen-orchestration-{stage}"
+
+            if not data.get("JOB_RETRY_QUEUE_NAME"):
+                data["JOB_RETRY_QUEUE_NAME"] = (
+                    f"hls-nextgen-orchestration-retry-{stage}"
+                )
+
+            if not data.get("JOB_FAILURE_DLQ_NAME"):
+                data["JOB_FAILURE_DLQ_NAME"] = (
+                    f"hls-nextgen-orchestration-failure-{stage}"
+                )
+
+            if not data.get("PROCESSING_LOG_GROUP_NAME"):
+                data["PROCESSING_LOG_GROUP_NAME"] = (
+                    f"hls-science-container-logs-{stage}"
+                )
+
+        return data
 
     MCP_ACCOUNT_ID: str
     MCP_ACCOUNT_REGION: str = "us-west-2"
@@ -93,13 +130,14 @@ class StackSettings(BaseSettings):
         "state-inventories/"
     )
 
+    # ----- Athena database (shared by records and state tables)
+    ATHENA_DATABASE_NAME: str
+
     # ----- Records Athena database
-    ATHENA_RECORDS_DATABASE_NAME: str
-    ATHENA_RECORDS_TABLE_START_DATE: str = "2020-01-01"
+    ATHENA_RECORDS_TABLE_START_DATE: str = "2026-05-01"
     ATHENA_RECORDS_SENTINEL_TABLE_NAME: str = "records_sentinel"
 
     # ----- State Athena database (S3 inventory over state/ prefix)
-    ATHENA_STATE_DATABASE_NAME: str
-    ATHENA_STATE_TABLE_START_DATETIME: dt.datetime
+    ATHENA_STATE_TABLE_START_DATETIME: dt.datetime = dt.datetime(2026, 5, 1)
     ATHENA_STATE_TABLE_NAME: str = "state_inventory"
     ATHENA_STATE_VIEW_NAME: str = "current_granule_states"

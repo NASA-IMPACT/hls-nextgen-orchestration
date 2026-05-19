@@ -1,12 +1,14 @@
 from typing import Any
 
 from aws_cdk import (
+    Aws,
     Duration,
     RemovalPolicy,
     Stack,
     aws_ec2 as ec2,
     aws_events as events,
     aws_events_targets as events_targets,
+    aws_glue as glue,
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_lambda_python_alpha as lambda_python,
@@ -104,10 +106,21 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # Athena databases
         # ----------------------------------------------------------------------
+        self.athena_database = glue.CfnDatabase(
+            self,
+            "AthenaDatabase",
+            catalog_id=Aws.ACCOUNT_ID,
+            database_name=settings.ATHENA_DATABASE_NAME,
+            database_input=glue.CfnDatabase.DatabaseInputProperty(
+                name=settings.ATHENA_DATABASE_NAME,
+                description="Athena database for HLS NextGen orchestration.",
+            ),
+        )
+
         self.athena_records_db = AthenaRecordsDatabase(
             self,
             "AthenaRecordsDatabase",
-            database_name=settings.ATHENA_DATABASE_NAME,
+            database=self.athena_database,
             records_bucket_name=settings.PROCESSING_BUCKET_NAME,
             table_date_range_start=settings.ATHENA_RECORDS_TABLE_START_DATE,
             sentinel_table_name=settings.ATHENA_RECORDS_SENTINEL_TABLE_NAME,
@@ -116,7 +129,7 @@ class HlsStack(Stack):
         self.athena_state_db = AthenaStateDatabase(
             self,
             "AthenaStateDatabase",
-            database_name=settings.ATHENA_DATABASE_NAME,
+            database=self.athena_database,
             inventory_location_s3path=(
                 f"s3://{settings.PROCESSING_BUCKET_NAME}"
                 f"/{settings.STATE_INVENTORY_PREFIX}"

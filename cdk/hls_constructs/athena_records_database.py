@@ -56,7 +56,7 @@ class AthenaRecordsDatabase(Construct):
         scope: Construct,
         construct_id: str,
         *,
-        database_name: str,
+        database: glue.CfnDatabase,
         records_bucket_name: str,
         table_date_range_start: str,
         sentinel_table_name: str,
@@ -64,18 +64,7 @@ class AthenaRecordsDatabase(Construct):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        self.database = glue.CfnDatabase(
-            self,
-            "Database",
-            catalog_id=Aws.ACCOUNT_ID,
-            database_name=database_name,
-            database_input=glue.CfnDatabase.DatabaseInputProperty(
-                name=database_name,
-                description=(
-                    "Athena database for HLS NextGen canonical processing records."
-                ),
-            ),
-        )
+        self.database = database
 
         self.sentinel_table = self._create_records_table(
             workflow="sentinel",
@@ -115,7 +104,7 @@ class AthenaRecordsDatabase(Construct):
             self,
             f"{workflow.capitalize()}RecordsTable",
             catalog_id=Aws.ACCOUNT_ID,
-            database_name=self.database.database_name,  # type: ignore[arg-type]
+            database_name=self.database.ref,
             table_input=glue.CfnTable.TableInputProperty(
                 name=table_name,
                 table_type="EXTERNAL_TABLE",

@@ -121,7 +121,7 @@ class AthenaStateDatabase(Construct):
         scope: Construct,
         construct_id: str,
         *,
-        database_name: str,
+        database: glue.CfnDatabase,
         inventory_location_s3path: str,
         table_datetime_start: dt.datetime,
         table_name: str,
@@ -130,18 +130,7 @@ class AthenaStateDatabase(Construct):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        self.database = glue.CfnDatabase(
-            self,
-            "Database",
-            catalog_id=Aws.ACCOUNT_ID,
-            database_name=database_name,
-            database_input=glue.CfnDatabase.DatabaseInputProperty(
-                name=database_name,
-                description=(
-                    "Athena database for HLS NextGen state-pointer reconciliation."
-                ),
-            ),
-        )
+        self.database = database
 
         self.inventory_table = self._create_inventory_table(
             table_name=table_name,
@@ -165,7 +154,7 @@ class AthenaStateDatabase(Construct):
             self,
             "InventoryTable",
             catalog_id=Aws.ACCOUNT_ID,
-            database_name=self.database.database_name,  # type: ignore[arg-type]
+            database_name=self.database.ref,
             table_input=glue.CfnTable.TableInputProperty(
                 name=table_name,
                 table_type="EXTERNAL_TABLE",
@@ -221,8 +210,7 @@ class AthenaStateDatabase(Construct):
         """
         # ruff: enable[E501]
 
-        database_name = self.database.database_name
-        assert database_name is not None
+        database_name = self.database.ref
 
         view_spec = {
             "originalSql": sql,

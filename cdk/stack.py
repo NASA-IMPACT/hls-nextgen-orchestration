@@ -1,12 +1,14 @@
 from typing import Any
 
 from aws_cdk import (
+    Aws,
     Duration,
     RemovalPolicy,
     Stack,
     aws_ec2 as ec2,
     aws_events as events,
     aws_events_targets as events_targets,
+    aws_glue as glue,
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_lambda_python_alpha as lambda_python,
@@ -125,6 +127,19 @@ class HlsStack(Stack):
             sentinel_table_name=settings.ATHENA_RECORDS_SENTINEL_TABLE_NAME,
         )
 
+        self.athena_state_db = AthenaStateDatabase(
+            self,
+            "AthenaStateDatabase",
+            database=self.athena_database,
+            inventory_location_s3path=(
+                f"s3://{settings.PROCESSING_BUCKET_NAME}"
+                f"/{settings.STATE_INVENTORY_PREFIX}"
+            ),
+            table_datetime_start=settings.ATHENA_STATE_TABLE_START_DATETIME,
+            table_name=settings.ATHENA_STATE_TABLE_NAME,
+            view_name=settings.ATHENA_STATE_VIEW_NAME,
+        )
+
         # ----------------------------------------------------------------------
         # Shared metrics log group (all Batch workflows write here)
         # ----------------------------------------------------------------------
@@ -133,7 +148,7 @@ class HlsStack(Stack):
             "MetricsLogGroup",
             log_group_name=f"/hls-orch/{settings.STAGE}/metrics",
             retention=logs.RetentionDays.THREE_MONTHS,
-            removal_policy=RemovalPolicy.RETAIN,
+            removal_policy=RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
         )
 
         # ----------------------------------------------------------------------
@@ -146,6 +161,7 @@ class HlsStack(Stack):
             instance_classes=settings.BATCH_INSTANCE_CLASSES,
             max_vcpu=settings.BATCH_MAX_VCPU,
             ami_id=settings.MCP_AMI_ID,
+            base_name=settings.BATCH_BASE_NAME,
             stage=settings.STAGE,
         )
 

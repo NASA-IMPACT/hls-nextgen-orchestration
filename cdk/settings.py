@@ -99,6 +99,9 @@ class StackSettings(BaseSettings):
         "/amazon-linux-2023/recommended/image_id"
     )
 
+    # Base name for Batch resources; JobQueue are named ``{BATCH_BASE_NAME}-{STAGE}``
+    BATCH_BASE_NAME: str = "hls-orch"
+
     # Cluster instance classes
     BATCH_INSTANCE_CLASSES: list[str] = [
         "C4",

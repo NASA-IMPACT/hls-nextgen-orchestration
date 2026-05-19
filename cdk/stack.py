@@ -1,17 +1,16 @@
 from typing import Any
 
 from aws_cdk import (
-    Aws,
     Duration,
     RemovalPolicy,
     Stack,
     aws_ec2 as ec2,
     aws_events as events,
     aws_events_targets as events_targets,
-    aws_glue as glue,
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_lambda_python_alpha as lambda_python,
+    aws_logs as logs,
     aws_s3 as s3,
     aws_s3_notifications as s3_notifications,
     aws_sqs as sqs,
@@ -126,17 +125,15 @@ class HlsStack(Stack):
             sentinel_table_name=settings.ATHENA_RECORDS_SENTINEL_TABLE_NAME,
         )
 
-        self.athena_state_db = AthenaStateDatabase(
+        # ----------------------------------------------------------------------
+        # Shared metrics log group (all Batch workflows write here)
+        # ----------------------------------------------------------------------
+        self.metrics_log_group = logs.LogGroup(
             self,
-            "AthenaStateDatabase",
-            database=self.athena_database,
-            inventory_location_s3path=(
-                f"s3://{settings.PROCESSING_BUCKET_NAME}"
-                f"/{settings.STATE_INVENTORY_PREFIX}"
-            ),
-            table_datetime_start=settings.ATHENA_STATE_TABLE_START_DATETIME,
-            table_name=settings.ATHENA_STATE_TABLE_NAME,
-            view_name=settings.ATHENA_STATE_VIEW_NAME,
+            "MetricsLogGroup",
+            log_group_name=f"/hls-orch/{settings.STAGE}/metrics",
+            retention=logs.RetentionDays.THREE_MONTHS,
+            removal_policy=RemovalPolicy.RETAIN,
         )
 
         # ----------------------------------------------------------------------
@@ -155,36 +152,32 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # HLS processing compute jobs
         # ----------------------------------------------------------------------
-        self.sentinel_job = BatchJob(
+        self.sentinel_ac_job = BatchJob(
             self,
             "SentinelJob",
+            job_name="sentinel-ac",
             container_ecr_uri=settings.SENTINEL_CONTAINER_ECR_URI,
             vcpu=settings.SENTINEL_JOB_VCPU,
             memory_mb=settings.SENTINEL_JOB_MEMORY_MB,
             retry_attempts=settings.PROCESSING_JOB_RETRY_ATTEMPTS,
-            log_group_name=settings.PROCESSING_LOG_GROUP_NAME,
-            environment={
-                "PYTHONUNBUFFERED": "TRUE",
-                "SENTINEL_BUCKET_NAME": self.sentinel_bucket.bucket_name,
-                "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
-                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
-            },
+            metrics_log_group=self.metrics_log_group,
+            environment={},
             secrets={},
             stage=settings.STAGE,
         )
 
-        self.output_bucket.grant_read_write(self.sentinel_job.role)
-        self.sentinel_bucket.grant_read(self.sentinel_job.role)
-        self.aux_data_bucket.grant_read(self.sentinel_job.role)
+        self.output_bucket.grant_read_write(self.sentinel_ac_job.role)
+        self.sentinel_bucket.grant_read(self.sentinel_ac_job.role)
+        self.aux_data_bucket.grant_read(self.sentinel_ac_job.role)
         if self.debug_bucket is not None:
-            self.debug_bucket.grant_read(self.sentinel_job.role)
+            self.debug_bucket.grant_read(self.sentinel_ac_job.role)
 
         # Shared policy for Batch job submission
         self.batch_submit_job_policy = iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             resources=[
                 self.batch_infra.queue.job_queue_arn,
-                self.sentinel_job.job_def_arn_without_revision,
+                self.sentinel_ac_job.job_def_arn_without_revision,
             ],
             actions=["batch:SubmitJob"],
         )
@@ -248,7 +241,7 @@ class HlsStack(Stack):
                     "jobDefinition": [
                         {
                             "wildcard": (
-                                f"*{self.sentinel_job.job_def.job_definition_name}*"
+                                f"*{self.sentinel_ac_job.job_def.job_definition_name}*"
                             )
                         },
                     ],
@@ -281,7 +274,7 @@ class HlsStack(Stack):
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "BATCH_JOB_DEFINITION_NAME": (
-                    self.sentinel_job.job_def.job_definition_name
+                    self.sentinel_ac_job.job_def.job_definition_name
                 ),
                 "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
             },
@@ -334,7 +327,7 @@ class HlsStack(Stack):
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "MAX_ACTIVE_JOBS": str(settings.MAX_ACTIVE_JOBS),
                 "SENTINEL_JOB_DEFINITION_NAME": (
-                    self.sentinel_job.job_def.job_definition_name
+                    self.sentinel_ac_job.job_def.job_definition_name
                 ),
             },
             layers=[self.powertools_layer],
@@ -442,7 +435,7 @@ class HlsStack(Stack):
                 "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "SENTINEL_JOB_DEFINITION_NAME": (
-                    self.sentinel_job.job_def.job_definition_name
+                    self.sentinel_ac_job.job_def.job_definition_name
                 ),
                 "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
             },

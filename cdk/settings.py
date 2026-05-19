@@ -53,11 +53,6 @@ class StackSettings(BaseSettings):
             if not data.get("JOB_FAILURE_DLQ_NAME"):
                 data["JOB_FAILURE_DLQ_NAME"] = f"hls-orch-failure-{stage}"
 
-            if not data.get("PROCESSING_LOG_GROUP_NAME"):
-                data["PROCESSING_LOG_GROUP_NAME"] = (
-                    f"hls-science-container-logs-{stage}"
-                )
-
         return data
 
     MCP_ACCOUNT_ID: str
@@ -93,8 +88,6 @@ class StackSettings(BaseSettings):
     # Job vCPU and memory limits
     SENTINEL_JOB_VCPU: int = 1
     SENTINEL_JOB_MEMORY_MB: int = 2_000
-    # Custom log group (otherwise they'll land in the catch-all AWS Batch log group)
-    PROCESSING_LOG_GROUP_NAME: str
     # Number of internal AWS Batch job retries
     PROCESSING_JOB_RETRY_ATTEMPTS: int = 3
 

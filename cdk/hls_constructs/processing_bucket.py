@@ -33,7 +33,7 @@ class ProcessingBucket(Construct):
             self,
             "Bucket",
             bucket_name=bucket_name,
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
             enforce_ssl=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             lifecycle_rules=[

@@ -3,6 +3,7 @@ from typing import Any, Literal
 from aws_cdk import (
     Aws,
     Duration,
+    RemovalPolicy,
     Size,
     aws_batch as batch,
     aws_ecr as ecr,
@@ -51,11 +52,12 @@ class BatchJob(Construct):
         scope: Construct,
         construct_id: str,
         *,
+        job_name: str,
         container_ecr_uri: str,
         vcpu: int,
         memory_mb: int,
         retry_attempts: int,
-        log_group_name: str,
+        metrics_log_group: logs.ILogGroup,
         environment: None | dict[str, str] = None,
         secrets: None | dict[str, batch.Secret] = None,
         stage: Literal["dev", "prod"],
@@ -66,7 +68,8 @@ class BatchJob(Construct):
         self.log_group = logs.LogGroup(
             self,
             "JobLogGroup",
-            log_group_name=log_group_name,
+            log_group_name=f"/hls-orch/{stage}/{job_name}",
+            removal_policy=RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
         )
 
         execution_role = iam.Role(
@@ -85,6 +88,13 @@ class BatchJob(Construct):
             "TaskRole",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
             role_name=f"hls-processing-role-{stage}",
+        )
+
+        self.role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["logs:CreateLogStream", "logs:PutLogEvents"],
+                resources=[f"{metrics_log_group.log_group_arn}:*"],
+            )
         )
 
         ecr_parsed = _parse_ecr_uri(container_ecr_uri)
@@ -113,7 +123,10 @@ class BatchJob(Construct):
                     log_group=self.log_group,
                 ),
                 secrets=secrets,
-                environment=environment or {},
+                environment={
+                    "METRIC_LOG_GROUP_NAME": metrics_log_group.log_group_name,
+                    **(environment or {}),
+                },
             ),
             timeout=Duration.hours(1),
             retry_attempts=retry_attempts,

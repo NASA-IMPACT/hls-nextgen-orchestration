@@ -1,14 +1,14 @@
 """Granule-init Lambda.
 
 Triggered by S3 object-created events on the Sentinel-2 input bucket
-(delivered via SNS → SQS).  For each arriving SAFE granule:
+(delivered via SNS -> SQS).  For each arriving SAFE granule:
 
   1. Detect twin granules (two SAFE IDs per MGRS tile) via S3 LIST.
   2. Derive output_granule_id and acquisition_date from the SAFE ID.
   3. Check ancillary data availability.
-     - Available  → submit Batch job, write SUBMITTED canonical record +
+     - Available  -> submit Batch job, write SUBMITTED canonical record +
                      state pointer.
-     - Unavailable → write AWAITING canonical record + state pointer.
+     - Unavailable -> write AWAITING canonical record + state pointer.
 """
 
 from __future__ import annotations
@@ -39,10 +39,23 @@ _WORKFLOW = "sentinel"
 
 
 @tracer.capture_method
-def parse_s3_sns_message(sqs_body: str) -> list[dict[str, Any]]:
-    """Unwrap S3 event records from an SNS-over-SQS message."""
-    sns_message = json.loads(sqs_body)
-    s3_event = json.loads(sns_message["Message"])
+def parse_s3_sqs_message(sqs_body: str) -> list[dict[str, Any]]:
+    """Unwrap S3 event records from an SQS message body.
+
+    Handles direct S3->SQS payloads, SNS-wrapped S3->SNS->SQS payloads, and
+    the S3 test notification that AWS sends when event notifications are first
+    configured (returns an empty list for test events).
+    """
+    body = json.loads(sqs_body)
+    # Direct S3->SQS notification
+    if "Records" in body:
+        return body["Records"]  # type: ignore[no-any-return]
+    # AWS s3:TestEvent sent on notification setup — nothing to process
+    if body.get("Event") == "s3:TestEvent":
+        logger.info("Received S3 test event; skipping")
+        return []
+    # SNS envelope: Message field holds the S3 event as a JSON string
+    s3_event = json.loads(body["Message"])
     return s3_event.get("Records", [])  # type: ignore[no-any-return]
 
 
@@ -131,7 +144,7 @@ def process_record(sqs_body: str) -> None:
 
     ts = dt.datetime.now(tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    s3_records = parse_s3_sns_message(sqs_body)
+    s3_records = parse_s3_sqs_message(sqs_body)
     for s3_record in s3_records:
         s3_info = s3_record["s3"]
         object_key = s3_info["object"]["key"]

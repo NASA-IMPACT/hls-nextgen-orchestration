@@ -74,16 +74,18 @@ _INVENTORY_COLUMNS = [
     ),
 ]
 
+# ruff: disable[E501]
 _VIEW_COLUMNS = [
     glue.CfnTable.ColumnProperty(
         name="state",
         type="string",
-        comment="Processing state (AWAITING, SUBMITTED, SUCCESS, …).",
+        comment="Processing state (AWAITING, SUBMITTED, SUCCESS, CLOUDY, LOW_SUN_ANGLE, FAILURE_RETRYABLE, FAILURE_NONRETRYABLE).",
     ),
+    # ruff: enable[E501]
     glue.CfnTable.ColumnProperty(
         name="workflow",
         type="string",
-        comment="Processing workflow (sentinel, landsat-ac, …).",
+        comment="Processing workflow (sentinel, landsat-ac, landsat-tile).",
     ),
     glue.CfnTable.ColumnProperty(
         name="acquisition_date",
@@ -196,11 +198,11 @@ class AthenaStateDatabase(Construct):
         # ruff: disable[E501]
         sql = f"""
         SELECT
-            regexp_extract(key, '^state/([^/]+)/', 1)                   AS state,
-            regexp_extract(key, '^state/[^/]+/([^/]+)/', 1)             AS workflow,
-            regexp_extract(key, '^state/[^/]+/[^/]+/([^/]+)/', 1)       AS acquisition_date,
-            regexp_extract(key, '^state/[^/]+/[^/]+/[^/]+/([^/]+)/', 1) AS source_granule_id,
-            CAST(regexp_extract(key, '/([0-9]{{3}})$', 1) AS INT)        AS attempt,
+            regexp_extract(key, '/state=([^/]+)/',             1) AS state,
+            regexp_extract(key, '/workflow=([^/]+)/',           1) AS workflow,
+            regexp_extract(key, '/acquisition_date=([^/]+)/',   1) AS acquisition_date,
+            regexp_extract(key, '/source_granule_id=([^/]+)/',  1) AS source_granule_id,
+            CAST(regexp_extract(key, '/([0-9]{{3}})$', 1) AS INT) AS attempt,
             last_modified_date,
             key
         FROM {table_name}

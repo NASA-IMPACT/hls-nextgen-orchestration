@@ -24,19 +24,28 @@ def store(bucket: str) -> S3RecordStore:
 class TestKeyConstructors:
     def test_canonical_key(self) -> None:
         key = S3RecordStore.canonical_key(WORKFLOW, ACQ_DATE, SRC_ID, ATTEMPT)
-        assert key == f"records/{WORKFLOW}/{ACQ_DATE}/{SRC_ID}/{ATTEMPT:03d}.json"
+        assert key == (
+            f"records/workflow={WORKFLOW}/acquisition_date={ACQ_DATE}"
+            f"/source_granule_id={SRC_ID}/{ATTEMPT:03d}.json"
+        )
 
     def test_state_pointer_key(self) -> None:
         key = S3RecordStore.state_pointer_key(
             ProcessingState.AWAITING, WORKFLOW, ACQ_DATE, SRC_ID, ATTEMPT
         )
-        assert key.startswith(f"state/AWAITING/{WORKFLOW}/{ACQ_DATE}/{SRC_ID}/")
+        assert key.startswith(
+            f"state/state=AWAITING/workflow={WORKFLOW}"
+            f"/acquisition_date={ACQ_DATE}/source_granule_id={SRC_ID}/"
+        )
 
     def test_output_index_key(self) -> None:
         key = S3RecordStore.output_index_key(
             ProcessingState.SUCCESS, WORKFLOW, ACQ_DATE, OUTPUT_ID
         )
-        assert key == f"outputs/SUCCESS/{WORKFLOW}/{ACQ_DATE}/{OUTPUT_ID}"
+        assert key == (
+            f"outputs/state=SUCCESS/workflow={WORKFLOW}"
+            f"/acquisition_date={ACQ_DATE}/{OUTPUT_ID}"
+        )
 
 
 class TestAppendCanonicalEvent:

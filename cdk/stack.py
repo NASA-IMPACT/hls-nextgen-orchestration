@@ -124,7 +124,8 @@ class HlsStack(Stack):
             database=self.athena_database,
             records_bucket_name=settings.PROCESSING_BUCKET_NAME,
             table_date_range_start=settings.ATHENA_RECORDS_TABLE_START_DATE,
-            sentinel_table_name=settings.ATHENA_RECORDS_SENTINEL_TABLE_NAME,
+            table_name=settings.ATHENA_RECORDS_TABLE_NAME,
+            twin_view_name=settings.ATHENA_RECORDS_TWIN_VIEW_NAME,
         )
 
         self.athena_state_db = AthenaStateDatabase(

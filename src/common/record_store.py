@@ -54,8 +54,17 @@ class S3RecordStore:
         workflow: str, acquisition_date: str, source_granule_id: str, attempt: int
     ) -> str:
         return (
-            f"records/{workflow}/{acquisition_date}"
-            f"/{source_granule_id}/{attempt:03d}.json"
+            f"records/workflow={workflow}/acquisition_date={acquisition_date}"
+            f"/source_granule_id={source_granule_id}/{attempt:03d}.json"
+        )
+
+    @staticmethod
+    def _state_prefix(
+        state: ProcessingState, workflow: str, acquisition_date: str
+    ) -> str:
+        return (
+            f"state/state={state.name}/workflow={workflow}"
+            f"/acquisition_date={acquisition_date}/"
         )
 
     @staticmethod
@@ -67,8 +76,8 @@ class S3RecordStore:
         attempt: int,
     ) -> str:
         return (
-            f"state/{state.name}/{workflow}/{acquisition_date}"
-            f"/{source_granule_id}/{attempt:03d}"
+            S3RecordStore._state_prefix(state, workflow, acquisition_date)
+            + f"source_granule_id={source_granule_id}/{attempt:03d}"
         )
 
     @staticmethod
@@ -78,7 +87,10 @@ class S3RecordStore:
         acquisition_date: str,
         output_granule_id: str,
     ) -> str:
-        return f"outputs/{state.name}/{workflow}/{acquisition_date}/{output_granule_id}"
+        return (
+            f"outputs/state={state.name}/workflow={workflow}"
+            f"/acquisition_date={acquisition_date}/{output_granule_id}"
+        )
 
     # -------------------------------------------------------- canonical record
 
@@ -256,7 +268,9 @@ class S3RecordStore:
         Returns a list of dicts parsed from the pointer JSON bodies,
         each containing source_granule_id, output_granule_id, attempt.
         """
-        prefix = f"state/{ProcessingState.AWAITING.name}/{workflow}/{acquisition_date}/"
+        prefix = self._state_prefix(
+            ProcessingState.AWAITING, workflow, acquisition_date
+        )
         results: list[dict[str, Any]] = []
         paginator = self.client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):

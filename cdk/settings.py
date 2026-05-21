@@ -139,8 +139,9 @@ class StackSettings(BaseSettings):
     ATHENA_DATABASE_NAME: str
 
     # ----- Records Athena database
-    ATHENA_RECORDS_TABLE_START_DATE: str = "2026-05-01"
-    ATHENA_RECORDS_SENTINEL_TABLE_NAME: str = "records_sentinel"
+    ATHENA_RECORDS_TABLE_START_DATE: str = "2013-01-01"
+    ATHENA_RECORDS_TABLE_NAME: str = "records"
+    ATHENA_RECORDS_TWIN_VIEW_NAME: str = "granule_twin_status"
 
     # ----- State Athena database (S3 inventory over state/ prefix)
     ATHENA_STATE_TABLE_START_DATETIME: dt.datetime = dt.datetime(2026, 5, 1)

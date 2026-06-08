@@ -22,7 +22,7 @@ The orchestration system uses S3 as an event store and processing-state driver:
   transition (`state/state=<state>/workflow=<workflow>/acquisition_date=<date>/source_granule_id=<id>/<attempt>`)
 - **Output index**: empty marker objects for terminal-state lookups
   (`outputs/state=<state>/workflow=<workflow>/acquisition_date=<date>/<output_id>`)
-- **Analytical layer** — Athena + S3 inventory for reconciliation and throughput queries
+- **Analytical layer** -- Athena + S3 inventory for reconciliation and throughput queries
 
 The alternative is a relational DB (Postgres / RDS / Aurora), which is the pattern used in the existing Step Functions
 pipeline.
@@ -52,18 +52,22 @@ pipeline.
 | S3 inventory                     | ~1 report/day                        | $0.0025/million objects | ~$1            |
 | **Total**                        |                                      |                         | **~$180/year** |
 
-### One-time full historical reprocessing
+### One-time full historical reprocessing (HLS v3, ~30M granules)
 
-Sentinel-2 has produced roughly 20 million acquisitions since 2015. At 6 API calls per transition and 4 transitions per
-granule:
+| Item                       | New system (S3 + event-driven) | Old system (Step Functions + RDS) |
+| -------------------------- | ------------------------------ | --------------------------------- |
+| S3 API calls (720M total)  | ~$4,100                        | --                                 |
+| Step Functions transitions | --                              | ~$55,000-$85,000                  |
+| Storage ongoing            | ~30 GB, ~$1/month              | Requires pruning                  |
+| **One-time total**         | **~$4,100**                    | **~$55,000-$85,000**              |
 
-| Item                     | Estimate                  |
-| ------------------------ | ------------------------- |
-| S3 API calls             | ~480M                     |
-| PUT cost                 | ~$2,400                   |
-| GET/LIST cost            | ~$300                     |
-| Storage for full history | ~20 GB, ~$5/month ongoing |
-| **One-time total**       | **~$2,700**               |
+The S3 cost scales linearly: 30M granules x 4 transitions x 6 API calls = 720M calls at the same per-request rates as
+steady-state operations.
+
+The Step Functions range reflects whether ancillary data is pre-available for the historical granules. If it is (the
+expected case for a reprocessing run), the 24-36 hour ancillary-wait polling loop is skipped, dropping to ~72
+transitions/granule (~$55,000). At the full production rate of 113 transitions/granule the cost reaches ~$85,000.
+Switching to Express Workflows would reduce this to ~$26,000, but requires code changes.
 
 Twin granule jobs add 20-30% overhead on affected tiles. The cost impact is minor.
 
@@ -118,51 +122,60 @@ rules fire only when something actually happens.
 
 ### Where polling costs accumulate
 
-**Step Functions Standard Workflows** charge $0.025 per 1,000 state transitions. A typical job moves through 10-15
-states (submit, wait, retry, succeed/fail). At 10,000 jobs/day and 12 transitions per job:
+**Step Functions Standard Workflows** charge $0.025 per 1,000 state transitions. A naive count of job lifecycle states
+(submit, wait, retry, succeed/fail) gives ~12 transitions per job, but the polling loop dominates in practice. Each
+Batch status check is a `Wait -> Lambda -> Choice` chain -- 3 transitions per cycle. A job that takes 20-30 minutes polled
+every 30-60 seconds runs 20-60 such loops, adding 60-180 polling transitions on top of the ~12 real ones.
 
-| Item              | Volume           | Rate         | Annual cost |
-| ----------------- | ---------------- | ------------ | ----------- |
-| State transitions | 120k/day, 44M/yr | $0.025/1,000 | ~$1,100     |
+Back-calculating from actual spend ($15,517.69/year at $0.025/1,000) gives ~1.7M transitions/day, or ~113 per granule at
+15,000 granules/day. That is consistent with ~20-minute average Batch job runtimes polled every 30-60 seconds.
+
+| Item                           | Volume            | Rate         | Annual cost        |
+| ------------------------------ | ----------------- | ------------ | ------------------ |
+| State transitions              | 1.7M/day, 621M/yr | $0.025/1,000 | **$15,518 actual** |
+| (naive 12-transition estimate) | 180k/day, 66M/yr  | $0.025/1,000 | ~$1,640            |
 
 Express Workflows are much cheaper ($1.00/million transitions + duration), but the Standard Workflow pricing is what the
 existing pipeline uses.
 
-**Scheduled Lambda polling** (e.g., check for new work every minute) runs 1,440 invocations/day per function regardless
-of whether there is work to do. Lambda invocation cost is negligible ($0.20/million), but the pattern means you are
-always paying for no-ops. More importantly, polling introduces latency: a granule that arrives 1 second after a poll
-waits up to 59 seconds to be picked up.
+**Lambda polling for ancillary data** runs inside each Step Functions execution: a Lambda checks whether the required
+ancillary data have arrived; if not, the state machine waits one hour and retries. Invocation count scales with how long
+granules sit waiting, not with a fixed global schedule. At ~100ms per check, individual duration cost is negligible, but
+invocation count accumulates: a granule waiting 24-36 hours for ancillary data triggers 24-36 retries. Across 15,000
+granules/day that is tens of millions of invocations per year, which accounts for the actual Lambda spend of ~$205/year.
 
-**Repeated AWS API calls** add up at scale. Polling Batch `DescribeJobs` for 10,000 active jobs at once requires
+**Repeated AWS API calls** add up at scale. Polling Batch `DescribeJobs` for 15,000 active jobs at once requires
 paginated calls every poll cycle. These are not billed directly but contribute to throttling risk and Lambda duration
 cost.
 
 ### Event-driven costs
 
-| Trigger                              | Volume at 10k granules/day | Rate          | Annual cost   |
+| Trigger                              | Volume at 15k granules/day | Rate          | Annual cost   |
 | ------------------------------------ | -------------------------- | ------------- | ------------- |
-| S3 event notifications               | 10k/day (free to SQS)      | $0            | $0            |
-| SQS messages (send + receive)        | ~40k/day                   | $0.40/million | ~$6           |
-| EventBridge (Batch job events)       | ~10k/day                   | $1.00/million | ~$3.65        |
-| Lambda invocations (event-triggered) | ~20k/day                   | $0.20/million | ~$1.50        |
-| **Total**                            |                            |               | **~$11/year** |
+| S3 event notifications               | 15k/day (free to SQS)      | $0            | $0            |
+| SQS messages (send + receive)        | ~60k/day                   | $0.40/million | ~$9           |
+| EventBridge (Batch job events)       | ~15k/day                   | $1.00/million | ~$5.50        |
+| Lambda invocations (event-triggered) | ~30k/day                   | $0.20/million | ~$2           |
+| **Total**                            |                            |               | **~$16/year** |
 
 Lambda only runs when there is a real event. There are no no-op poll cycles.
 
 ### Comparison
 
-|                            | Scheduled/poll                             | Event-driven             |
-| -------------------------- | ------------------------------------------ | ------------------------ |
-| Step Functions             | ~$1,100/year (Standard)                    | Not used                 |
-| Lambda idle cost           | Constant (1,440+ invocations/day/function) | Zero                     |
-| Trigger latency            | Up to poll interval (seconds to minutes)   | Near-zero (milliseconds) |
-| Scales with granule volume | No (polling is fixed cost)                 | Yes                      |
-| Throttling risk            | Higher (repeated describe calls)           | Lower                    |
-| **Approx. annual cost**    | **~$1,100+**                               | **~$11**                 |
+|                       | Scheduled/poll (existing)                | Event-driven (new) |
+| --------------------- | ---------------------------------------- | ------------------ |
+| Step Functions        | **$15,518/year actual**                  | Not used           |
+| RDS/Postgres          | **$4,375/year actual** (min_cap=4)       | Not used           |
+| Lambda                | **$205/year actual** (invocation-driven) | ~$2/year           |
+| S3 (ancillary checks) | **~$60/year actual** (List/Head calls)   | ~$0                |
+| S3 event store        | Not used                                 | ~$180/year         |
+| SQS + EventBridge     | Not used                                 | ~$15/year          |
+| **Total annual cost** | **~$20,160/year**                        | **~$200/year**     |
 
-The event-driven approach is roughly 100x cheaper for the orchestration layer at HLS scale. The saving comes from two
-sources: removing Step Functions Standard Workflow charges, and eliminating idle Lambda invocations that find no work to
-do.
+The event-driven approach is roughly 100x cheaper at HLS scale. The dominant saving is Step Functions: polling loops
+generate ~113 state transitions per granule versus the ~12 "real" job-lifecycle transitions, inflating cost by ~10x over
+a naive estimate. Removing RDS adds another ~$4,400/year saving. The existing system also spends ~$60/year on S3
+List/Head calls for ancillary data checks; the new design eliminates these by reacting to S3 events instead of polling.
 
 ---
 
@@ -182,6 +195,12 @@ current-state counts is the right fix. That is a targeted addition, not a full m
 during historical reprocessing, this generates significant S3 API traffic. The numbers above account for this. Monitor
 API costs during large reprocessing runs.
 
+The throttling risk is mitigated by the key prefix design. S3 scales to at least 3,500 PUT and 5,500 GET requests per
+second [per prefix](https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html). The
+hive-partitioned layout (`state=<state>/workflow=<workflow>/acquisition_date=<date>/source_granule_id=<id>/`) spreads
+writes across a large number of distinct prefixes -- one per granule per acquisition date -- so even at peak reprocessing
+throughput the per-prefix request rate stays well below the S3 limit.
+
 **Developer complexity.** S3 + Athena is harder to operate than a standard Postgres schema. This analysis excludes
 developer time. The S3 approach trades lower infrastructure cost for higher complexity in the state management layer.
 
@@ -193,8 +212,9 @@ granule. This roughly doubles API cost for affected tiles. It does not change th
 ## Conclusion
 
 For HLS access patterns (high write volume, rare reads, indefinite retention, no real-time query requirement) the S3
-event store is cheaper than RDS. The main saving is removing the always-on instance cost of $300-600/year. S3 costs
-scale with granule volume and stay low at operational scale.
+event store is cheaper than RDS. The dominant saving is eliminating Step Functions: polling loops generate ~100x more
+state transitions than the job lifecycle alone, making it by far the largest cost driver in the existing system. S3
+costs scale with granule volume and stay low at operational scale.
 
 The assumption holds unless real-time operational monitoring becomes a hard requirement. In that case, add a lightweight
 cache rather than migrating to RDS.

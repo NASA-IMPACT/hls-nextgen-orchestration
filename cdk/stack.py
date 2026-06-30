@@ -123,6 +123,7 @@ class HlsStack(Stack):
             self,
             "AthenaRecordsDatabase",
             database=self.athena_database,
+            database_name=settings.ATHENA_DATABASE_NAME,
             records_bucket_name=settings.PROCESSING_BUCKET_NAME,
             table_date_range_start=settings.ATHENA_RECORDS_TABLE_START_DATE,
             table_name=settings.ATHENA_RECORDS_TABLE_NAME,
@@ -133,6 +134,7 @@ class HlsStack(Stack):
             self,
             "AthenaStateDatabase",
             database=self.athena_database,
+            database_name=settings.ATHENA_DATABASE_NAME,
             # S3 inventory reports land under {prefix}{source-bucket}/{inventory-id}/,
             # with the Hive-style symlink manifests (dt=.../symlink.txt) under the hive/
             # subprefix.

@@ -86,6 +86,7 @@ class AthenaRecordsDatabase(Construct):
         construct_id: str,
         *,
         database: glue.CfnDatabase,
+        database_name: str,
         records_bucket_name: str,
         table_date_range_start: str,
         table_name: str,
@@ -106,6 +107,7 @@ class AthenaRecordsDatabase(Construct):
         self.twin_view = self._create_twin_view(
             view_name=twin_view_name,
             table_name=table_name,
+            database_name=database_name,
         )
 
     def _create_records_table(
@@ -177,7 +179,9 @@ class AthenaRecordsDatabase(Construct):
         table.add_dependency(self.database)
         return table
 
-    def _create_twin_view(self, *, view_name: str, table_name: str) -> glue.CfnTable:
+    def _create_twin_view(
+        self, *, view_name: str, table_name: str, database_name: str
+    ) -> glue.CfnTable:
         # ruff: disable[E501]
         sql = f"""
         SELECT
@@ -206,11 +210,13 @@ class AthenaRecordsDatabase(Construct):
         """
         # ruff: enable[E501]
 
-        database_name = self.database.ref
-
+        # The view spec is base64-encoded at synth time, so CloudFormation
+        # cannot substitute tokens inside it. Use literal strings for catalog
+        # and schema -- "awsdatacatalog" is the Athena catalog name (not the
+        # account id), and database_name is the literal Glue database name.
         view_spec = {
             "originalSql": sql,
-            "catalog": Aws.ACCOUNT_ID,
+            "catalog": "awsdatacatalog",
             "schema": database_name,
             "columns": [
                 {"name": col.name, "type": _athena_to_presto(col.type)}
@@ -223,7 +229,7 @@ class AthenaRecordsDatabase(Construct):
             self,
             "TwinView",
             catalog_id=Aws.ACCOUNT_ID,
-            database_name=database_name,
+            database_name=self.database.ref,
             table_input=glue.CfnTable.TableInputProperty(
                 name=view_name,
                 table_type="VIRTUAL_VIEW",

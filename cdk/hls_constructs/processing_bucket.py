@@ -25,6 +25,7 @@ class ProcessingBucket(Construct):
         *,
         bucket_name: str,
         state_inventory_prefix: str,
+        state_inventory_id: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -60,7 +61,7 @@ class ProcessingBucket(Construct):
                 bucket=inventory_dest,
                 prefix=state_inventory_prefix.rstrip("/"),
             ),
-            inventory_id="state-pointers",
+            inventory_id=state_inventory_id,
             format=s3.InventoryFormat.PARQUET,
             frequency=s3.InventoryFrequency.DAILY,
             objects_prefix="state/",

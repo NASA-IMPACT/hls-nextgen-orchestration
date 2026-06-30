@@ -169,7 +169,7 @@ class AthenaStateDatabase(Construct):
                         f"{table_datetime_start:%Y-%m-%d-%H-%M},NOW"
                     ),
                     "projection.dt.interval": "1",
-                    "projection.dt.interval.unit": "HOURS",
+                    "projection.dt.interval.unit": "DAYS",
                 },
                 partition_keys=[
                     glue.CfnTable.ColumnProperty(

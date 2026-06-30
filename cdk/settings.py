@@ -134,6 +134,9 @@ class StackSettings(BaseSettings):
     STATE_INVENTORY_PREFIX: Annotated[str, BeforeValidator(include_trailing_slash)] = (
         "state-inventories/"
     )
+    # S3 inventory configuration id. S3 writes reports under
+    # {STATE_INVENTORY_PREFIX}{source-bucket}/{STATE_INVENTORY_ID}/.
+    STATE_INVENTORY_ID: str = "state-pointers"
 
     # ----- Athena database (shared by records and state tables)
     ATHENA_DATABASE_NAME: str
@@ -144,7 +147,10 @@ class StackSettings(BaseSettings):
     ATHENA_RECORDS_TWIN_VIEW_NAME: str = "granule_twin_status"
 
     # ----- State Athena database (S3 inventory over state/ prefix)
-    ATHENA_STATE_TABLE_START_DATETIME: dt.datetime = dt.datetime(2026, 5, 1)
+    # The time-of-day MUST match the hour S3 delivers the daily inventory
+    # (observed 01:00 UTC). Daily partition projection steps by 24h from this
+    # anchor, so a mismatched hour would project partitions that never exist.
+    ATHENA_STATE_TABLE_START_DATETIME: dt.datetime = dt.datetime(2026, 5, 1, 1, 0)
     ATHENA_STATE_TABLE_NAME: str = "state_inventory"
     ATHENA_STATE_VIEW_NAME: str = "current_granule_states"
 

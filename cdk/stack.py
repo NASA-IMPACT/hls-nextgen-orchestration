@@ -82,6 +82,7 @@ class HlsStack(Stack):
             "ProcessingBucket",
             bucket_name=settings.PROCESSING_BUCKET_NAME,
             state_inventory_prefix=settings.STATE_INVENTORY_PREFIX,
+            state_inventory_id=settings.STATE_INVENTORY_ID,
         )
         self.processing_bucket = _processing.bucket
 
@@ -132,9 +133,14 @@ class HlsStack(Stack):
             self,
             "AthenaStateDatabase",
             database=self.athena_database,
+            # S3 inventory reports land under {prefix}{source-bucket}/{inventory-id}/,
+            # with the Hive-style symlink manifests (dt=.../symlink.txt) under the hive/
+            # subprefix.
             inventory_location_s3path=(
                 f"s3://{settings.PROCESSING_BUCKET_NAME}"
                 f"/{settings.STATE_INVENTORY_PREFIX}"
+                f"{settings.PROCESSING_BUCKET_NAME}/"
+                f"{settings.STATE_INVENTORY_ID}/hive/"
             ),
             table_datetime_start=settings.ATHENA_STATE_TABLE_START_DATETIME,
             table_name=settings.ATHENA_STATE_TABLE_NAME,

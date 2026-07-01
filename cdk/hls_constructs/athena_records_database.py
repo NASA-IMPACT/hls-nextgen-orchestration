@@ -17,20 +17,17 @@ partition pruning preserved through the join predicates.
 
 from __future__ import annotations
 
-import base64
-import json
 from typing import Any
 
 from aws_cdk import Aws, RemovalPolicy, aws_glue as glue
 from constructs import Construct
 
-# Athena JSON SerDe
-_JSON_INPUT_FORMAT = "org.apache.hadoop.mapred.TextInputFormat"
-_JSON_OUTPUT_FORMAT = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
-_JSON_SERDE = "org.openx.data.jsonserde.JsonSerDe"
-
-# Virtual views use the symlink input format (same as AthenaStateDatabase)
-_SYMLINK_INPUT_FORMAT = "org.apache.hadoop.hive.ql.io.SymlinkTextInputFormat"
+from .athena_common import (
+    HIVE_TEXT_OUTPUT_FORMAT,
+    JSON_INPUT_FORMAT,
+    JSON_SERDE,
+    create_presto_view,
+)
 
 # events[] struct — matches ProcessingEventRecord fields
 _EVENTS_TYPE = "array<struct<state:string,ts:string,batch_job_id:string,exit_code:int>>"
@@ -64,17 +61,6 @@ _TWIN_VIEW_COLUMNS = [
 ]
 
 _KNOWN_WORKFLOWS = ["sentinel", "landsat-ac", "landsat-tile"]
-
-
-def _athena_to_presto(athena_type: str | None) -> str:
-    if athena_type is None:
-        raise ValueError("Cannot convert null Athena type")
-    return {
-        "string": "varchar",
-        "struct": "row",
-        "float": "real",
-        "binary": "varbinary",
-    }.get(athena_type.lower(), athena_type.lower())
 
 
 class AthenaRecordsDatabase(Construct):
@@ -166,10 +152,10 @@ class AthenaRecordsDatabase(Construct):
                 storage_descriptor=glue.CfnTable.StorageDescriptorProperty(
                     columns=columns,
                     location=s3_location,
-                    input_format=_JSON_INPUT_FORMAT,
-                    output_format=_JSON_OUTPUT_FORMAT,
+                    input_format=JSON_INPUT_FORMAT,
+                    output_format=HIVE_TEXT_OUTPUT_FORMAT,
                     serde_info=glue.CfnTable.SerdeInfoProperty(
-                        serialization_library=_JSON_SERDE,
+                        serialization_library=JSON_SERDE,
                         parameters={"serialization.format": "1"},
                     ),
                 ),
@@ -210,40 +196,13 @@ class AthenaRecordsDatabase(Construct):
         """
         # ruff: enable[E501]
 
-        # The view spec is base64-encoded at synth time, so CloudFormation
-        # cannot substitute tokens inside it. Use literal strings for catalog
-        # and schema -- "awsdatacatalog" is the Athena catalog name (not the
-        # account id), and database_name is the literal Glue database name.
-        view_spec = {
-            "originalSql": sql,
-            "catalog": "awsdatacatalog",
-            "schema": database_name,
-            "columns": [
-                {"name": col.name, "type": _athena_to_presto(col.type)}
-                for col in _TWIN_VIEW_COLUMNS
-            ],
-        }
-        sql_b64 = base64.b64encode(json.dumps(view_spec).encode()).decode()
-
-        view = glue.CfnTable(
+        return create_presto_view(
             self,
             "TwinView",
-            catalog_id=Aws.ACCOUNT_ID,
-            database_name=self.database.ref,
-            table_input=glue.CfnTable.TableInputProperty(
-                name=view_name,
-                table_type="VIRTUAL_VIEW",
-                parameters={"presto_view": "true", "comment": "Presto View"},
-                partition_keys=[],
-                storage_descriptor=glue.CfnTable.StorageDescriptorProperty(
-                    columns=_TWIN_VIEW_COLUMNS,
-                    input_format=_SYMLINK_INPUT_FORMAT,
-                    output_format=_JSON_OUTPUT_FORMAT,
-                ),
-                view_original_text=f"/* Presto View: {sql_b64} */",
-                view_expanded_text="/* Presto View */",
-            ),
+            database=self.database,
+            database_name=database_name,
+            view_name=view_name,
+            sql=sql,
+            columns=_TWIN_VIEW_COLUMNS,
+            depends_on=self.records_table,
         )
-        view.apply_removal_policy(RemovalPolicy.DESTROY)
-        view.add_dependency(self.records_table)
-        return view

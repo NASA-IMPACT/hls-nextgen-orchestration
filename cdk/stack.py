@@ -20,6 +20,7 @@ from aws_cdk import (
 from constructs import Construct
 
 from hls_constructs import (
+    AthenaOutputsDatabase,
     AthenaRecordsDatabase,
     AthenaStateDatabase,
     BatchInfra,
@@ -81,8 +82,9 @@ class HlsStack(Stack):
             self,
             "ProcessingBucket",
             bucket_name=settings.PROCESSING_BUCKET_NAME,
-            state_inventory_prefix=settings.STATE_INVENTORY_PREFIX,
+            inventory_prefix=settings.INVENTORY_PREFIX,
             state_inventory_id=settings.STATE_INVENTORY_ID,
+            outputs_inventory_id=settings.OUTPUTS_INVENTORY_ID,
         )
         self.processing_bucket = _processing.bucket
 
@@ -135,18 +137,25 @@ class HlsStack(Stack):
             "AthenaStateDatabase",
             database=self.athena_database,
             database_name=settings.ATHENA_DATABASE_NAME,
-            # S3 inventory reports land under {prefix}{source-bucket}/{inventory-id}/,
-            # with the Hive-style symlink manifests (dt=.../symlink.txt) under the hive/
-            # subprefix.
-            inventory_location_s3path=(
-                f"s3://{settings.PROCESSING_BUCKET_NAME}"
-                f"/{settings.STATE_INVENTORY_PREFIX}"
-                f"{settings.PROCESSING_BUCKET_NAME}/"
-                f"{settings.STATE_INVENTORY_ID}/hive/"
+            inventory_location_s3path=self._inventory_location(
+                settings, settings.STATE_INVENTORY_ID
             ),
             table_datetime_start=settings.ATHENA_STATE_TABLE_START_DATETIME,
             table_name=settings.ATHENA_STATE_TABLE_NAME,
             view_name=settings.ATHENA_STATE_VIEW_NAME,
+        )
+
+        self.athena_outputs_db = AthenaOutputsDatabase(
+            self,
+            "AthenaOutputsDatabase",
+            database=self.athena_database,
+            database_name=settings.ATHENA_DATABASE_NAME,
+            inventory_location_s3path=self._inventory_location(
+                settings, settings.OUTPUTS_INVENTORY_ID
+            ),
+            table_datetime_start=settings.ATHENA_OUTPUTS_TABLE_START_DATETIME,
+            table_name=settings.ATHENA_OUTPUTS_TABLE_NAME,
+            view_name=settings.ATHENA_OUTPUTS_VIEW_NAME,
         )
 
         # ----------------------------------------------------------------------
@@ -541,4 +550,17 @@ class HlsStack(Stack):
                     noncurrent_version_expiration=Duration.days(1),
                 ),
             ],
+        )
+
+    @staticmethod
+    def _inventory_location(settings: StackSettings, inventory_id: str) -> str:
+        """S3 path of an inventory's Hive symlink manifests.
+
+        S3 writes reports under {prefix}{source-bucket}/{inventory-id}/, with the
+        Hive-style symlink manifests (dt=.../symlink.txt) under the hive/ subprefix
+        that SymlinkTextInputFormat reads.
+        """
+        bucket = settings.PROCESSING_BUCKET_NAME
+        return (
+            f"s3://{bucket}/{settings.INVENTORY_PREFIX}{bucket}/{inventory_id}/hive/"
         )

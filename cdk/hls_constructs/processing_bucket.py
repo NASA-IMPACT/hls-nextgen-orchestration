@@ -24,8 +24,9 @@ class ProcessingBucket(Construct):
         construct_id: str,
         *,
         bucket_name: str,
-        state_inventory_prefix: str,
+        inventory_prefix: str,
         state_inventory_id: str,
+        outputs_inventory_id: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -55,27 +56,56 @@ class ProcessingBucket(Construct):
             "InventoryDest",
             f"arn:aws:s3:::{bucket_name}",
         )
-        self.bucket.add_inventory(
-            enabled=True,
-            destination=s3.InventoryDestination(
-                bucket=inventory_dest,
-                prefix=state_inventory_prefix.rstrip("/"),
-            ),
+
+        # Daily S3 Inventory over the state/ and outputs/ prefixes. All
+        # operationally useful info is encoded in the key path, so Athena reads
+        # the Parquet inventory and parses keys -- no object body reads needed.
+        # Every inventory shares the inventory_prefix root (S3 namespaces them by
+        # inventory_id), so one lifecycle rule and one grant cover them all.
+        self._add_inventory(
+            destination=inventory_dest,
+            destination_prefix=inventory_prefix,
             inventory_id=state_inventory_id,
-            format=s3.InventoryFormat.PARQUET,
-            frequency=s3.InventoryFrequency.DAILY,
             objects_prefix="state/",
-            optional_fields=["LastModifiedDate"],
         )
+        self._add_inventory(
+            destination=inventory_dest,
+            destination_prefix=inventory_prefix,
+            inventory_id=outputs_inventory_id,
+            objects_prefix="outputs/",
+        )
+
         self.bucket.add_lifecycle_rule(
-            prefix=state_inventory_prefix,
+            prefix=inventory_prefix,
             expiration=Duration.days(14),
         )
         self.bucket.add_to_resource_policy(
             iam.PolicyStatement(
                 actions=["s3:PutObject"],
-                resources=[self.bucket.arn_for_objects(f"{state_inventory_prefix}*")],
+                resources=[self.bucket.arn_for_objects(f"{inventory_prefix}*")],
                 principals=[iam.ServicePrincipal("s3.amazonaws.com")],
                 effect=iam.Effect.ALLOW,
             )
+        )
+
+    def _add_inventory(
+        self,
+        *,
+        destination: s3.IBucket,
+        destination_prefix: str,
+        inventory_id: str,
+        objects_prefix: str,
+    ) -> None:
+        """Configure a daily Parquet S3 Inventory under the shared root prefix."""
+        self.bucket.add_inventory(
+            enabled=True,
+            destination=s3.InventoryDestination(
+                bucket=destination,
+                prefix=destination_prefix.rstrip("/"),
+            ),
+            inventory_id=inventory_id,
+            format=s3.InventoryFormat.PARQUET,
+            frequency=s3.InventoryFrequency.DAILY,
+            objects_prefix=objects_prefix,
+            optional_fields=["LastModifiedDate"],
         )

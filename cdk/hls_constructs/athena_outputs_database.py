@@ -1,17 +1,18 @@
-"""CDK construct for the Athena state-inventory database.
+"""CDK construct for the Athena output-index database.
 
-Creates a Glue database + S3-inventory table over the ``state/`` prefix of the
+Creates a Glue database + S3-inventory table over the ``outputs/`` prefix of the
 processing bucket, plus a view that parses each key into structured columns.
 
 Key schema:
-  ``state/state={STATE}/workflow={workflow}/acquisition_date={acquisition_date}/source_granule_id={source_granule_id}/{attempt:03d}``
+  ``outputs/state={STATE}/workflow={workflow}/acquisition_date={acquisition_date}/{output_granule_id}``
 
-The inventory snapshot (daily Parquet) is cheap to query and supports
-reconciliation queries such as:
+Output-index entries are written by ``job_monitor`` at terminal state for all
+outcomes (SUCCESS, CLOUDY, LOW_SUN_ANGLE, ...), keyed by ``output_granule_id``.
+This makes the inventory the source for downstream reconciliation queries:
 
-  - Count granules by state / workflow / acquisition_date
-  - Find granules stuck in SUBMITTED or AWAITING for a given date
-  - Diff today vs yesterday to measure throughput
+  - LP DAAC reconciliation: compare ``SUCCESS`` output granule IDs to the catalog
+  - Coverage by date: count produced products by workflow / acquisition_date
+  - Screen-out rates: CLOUDY / LOW_SUN_ANGLE counts over time
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ _VIEW_COLUMNS = [
     glue.CfnTable.ColumnProperty(
         name="state",
         type="string",
-        comment="Processing state (AWAITING, SUBMITTED, SUCCESS, CLOUDY, LOW_SUN_ANGLE, FAILURE_RETRYABLE, FAILURE_NONRETRYABLE).",
+        comment="Terminal state (SUCCESS, CLOUDY, LOW_SUN_ANGLE, FAILURE_NONRETRYABLE).",
     ),
     # ruff: enable[E501]
     glue.CfnTable.ColumnProperty(
@@ -47,30 +48,25 @@ _VIEW_COLUMNS = [
         comment="Granule acquisition date (YYYY-MM-DD).",
     ),
     glue.CfnTable.ColumnProperty(
-        name="source_granule_id",
+        name="output_granule_id",
         type="string",
-        comment="Source granule identifier (SAFE ID or scene ID).",
-    ),
-    glue.CfnTable.ColumnProperty(
-        name="attempt",
-        type="int",
-        comment="Attempt number (0-indexed).",
+        comment="HLS output product identifier.",
     ),
     glue.CfnTable.ColumnProperty(
         name="last_modified_date",
         type="timestamp",
-        comment="When the state pointer was last written.",
+        comment="When the output-index entry was written.",
     ),
     glue.CfnTable.ColumnProperty(
         name="key",
         type="string",
-        comment="Full S3 key of the state pointer object.",
+        comment="Full S3 key of the output-index object.",
     ),
 ]
 
 
-class AthenaStateDatabase(Construct):
-    """Athena database for reconciliation queries over state/ pointer objects."""
+class AthenaOutputsDatabase(Construct):
+    """Athena database for reconciliation queries over outputs/ index objects."""
 
     def __init__(
         self,
@@ -98,9 +94,9 @@ class AthenaStateDatabase(Construct):
             datetime_start=table_datetime_start,
         )
 
-        self.state_view = create_presto_view(
+        self.outputs_view = create_presto_view(
             self,
-            "StateView",
+            "OutputsView",
             database=database,
             database_name=database_name,
             view_name=view_name,
@@ -115,11 +111,10 @@ class AthenaStateDatabase(Construct):
         # ruff: disable[E501]
         return f"""
         SELECT
-            regexp_extract(key, '/state=([^/]+)/',             1) AS state,
-            regexp_extract(key, '/workflow=([^/]+)/',           1) AS workflow,
-            regexp_extract(key, '/acquisition_date=([^/]+)/',   1) AS acquisition_date,
-            regexp_extract(key, '/source_granule_id=([^/]+)/',  1) AS source_granule_id,
-            CAST(regexp_extract(key, '/([0-9]{{3}})$', 1) AS INT) AS attempt,
+            regexp_extract(key, '/state=([^/]+)/',                  1) AS state,
+            regexp_extract(key, '/workflow=([^/]+)/',               1) AS workflow,
+            regexp_extract(key, '/acquisition_date=([^/]+)/',       1) AS acquisition_date,
+            regexp_extract(key, '/acquisition_date=[^/]+/([^/]+)$', 1) AS output_granule_id,
             last_modified_date,
             key
         FROM {table_name}

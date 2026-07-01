@@ -130,13 +130,16 @@ class StackSettings(BaseSettings):
     # DLQ for the ancillary-submit queue
     ANCILLARY_SUBMIT_DLQ_NAME: str
 
-    # ----- State-pointer inventory (state/ prefix → daily S3 inventory)
-    STATE_INVENTORY_PREFIX: Annotated[str, BeforeValidator(include_trailing_slash)] = (
-        "state-inventories/"
+    # ----- Daily S3 Inventories (state/ and outputs/ prefixes -> Parquet)
+    # All inventories share one destination root. S3 writes each report under
+    # {INVENTORY_PREFIX}{source-bucket}/{inventory-id}/, so the per-inventory id
+    # namespaces the reports and one lifecycle rule / grant covers them all.
+    INVENTORY_PREFIX: Annotated[str, BeforeValidator(include_trailing_slash)] = (
+        "inventories/"
     )
-    # S3 inventory configuration id. S3 writes reports under
-    # {STATE_INVENTORY_PREFIX}{source-bucket}/{STATE_INVENTORY_ID}/.
-    STATE_INVENTORY_ID: str = "state-pointers"
+    # Inventory ids match the source prefix each one covers (state/, outputs/).
+    STATE_INVENTORY_ID: str = "state"
+    OUTPUTS_INVENTORY_ID: str = "outputs"
 
     # ----- Athena database (shared by records and state tables)
     ATHENA_DATABASE_NAME: str
@@ -153,6 +156,13 @@ class StackSettings(BaseSettings):
     ATHENA_STATE_TABLE_START_DATETIME: dt.datetime = dt.datetime(2026, 5, 1, 1, 0)
     ATHENA_STATE_TABLE_NAME: str = "state_inventory"
     ATHENA_STATE_VIEW_NAME: str = "current_granule_states"
+
+    # ----- Outputs Athena database (S3 inventory over outputs/ prefix)
+    # See ATHENA_STATE_TABLE_START_DATETIME for why the hour must match the
+    # S3 inventory delivery time (observed 01:00 UTC).
+    ATHENA_OUTPUTS_TABLE_START_DATETIME: dt.datetime = dt.datetime(2026, 5, 1, 1, 0)
+    ATHENA_OUTPUTS_TABLE_NAME: str = "outputs_inventory"
+    ATHENA_OUTPUTS_VIEW_NAME: str = "current_outputs"
 
     # ----- Phase 0 shadow observability (Sentinel-2 only)
     # Set these to shadow the existing Step Functions Sentinel-2 AC Batch jobs.

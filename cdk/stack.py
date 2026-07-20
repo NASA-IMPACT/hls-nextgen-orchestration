@@ -332,16 +332,18 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # Granule-init Lambda (Sentinel-2 arrival → AWAITING or SUBMITTED)
         # ----------------------------------------------------------------------
-        self.granule_init_queue = sqs.Queue(
+        self.granule_init = QueueWithDlq(
             self,
             "GranuleInitQueue",
-            retention_period=Duration.days(14),
+            queue_name=settings.GRANULE_INIT_QUEUE_NAME,
+            dlq_name=settings.GRANULE_INIT_DLQ_NAME,
             visibility_timeout=Duration.minutes(10),
+            max_receive_count=3,
         )
 
         self.sentinel_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,
-            s3_notifications.SqsDestination(self.granule_init_queue),
+            s3_notifications.SqsDestination(self.granule_init.queue),
         )
 
         self.granule_init_lambda = lambda_python.PythonFunction(
@@ -370,7 +372,7 @@ class HlsStack(Stack):
             ),
         )
 
-        self.granule_init_queue.grant_consume_messages(self.granule_init_lambda)
+        self.granule_init.queue.grant_consume_messages(self.granule_init_lambda)
         self.processing_bucket.grant_read_write(self.granule_init_lambda)
         self.sentinel_bucket.grant_read(self.granule_init_lambda)
         self.aux_data_bucket.grant_read(self.granule_init_lambda)
@@ -389,7 +391,7 @@ class HlsStack(Stack):
             batch_size=1,
             max_batching_window=Duration.seconds(0),
             report_batch_item_failures=True,
-            event_source_arn=self.granule_init_queue.queue_arn,
+            event_source_arn=self.granule_init.queue.queue_arn,
         )
 
         # ----------------------------------------------------------------------

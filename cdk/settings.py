@@ -53,6 +53,14 @@ class StackSettings(BaseSettings):
             if not data.get("JOB_FAILURE_DLQ_NAME"):
                 data["JOB_FAILURE_DLQ_NAME"] = f"hls-orch-failure-{stage}"
 
+            if not data.get("GRANULE_INIT_QUEUE_NAME"):
+                data["GRANULE_INIT_QUEUE_NAME"] = f"hls-orch-granule-init-{stage}"
+
+            if not data.get("GRANULE_INIT_DLQ_NAME"):
+                data["GRANULE_INIT_DLQ_NAME"] = (
+                    f"hls-orch-granule-init-dlq-{stage}"
+                )
+
         return data
 
     MCP_ACCOUNT_ID: str
@@ -121,6 +129,12 @@ class StackSettings(BaseSettings):
     JOB_RETRY_QUEUE_NAME: str
     # Failed AWS Batch jobs go to a DLQ that can redrive to the retry queue
     JOB_FAILURE_DLQ_NAME: str
+
+    # ----- Granule-init trigger
+    # SQS queue that receives S3 event notifications from the sentinel bucket
+    GRANULE_INIT_QUEUE_NAME: str
+    # DLQ for poison messages the granule-init Lambda cannot process
+    GRANULE_INIT_DLQ_NAME: str
 
     # ----- Ancillary trigger
     # SQS queue that receives S3 event notifications from the aux data bucket

@@ -500,10 +500,19 @@ class HlsStack(Stack):
         canonical records. Delete or disable this method once Phase 1 is fully deployed.
         """
         if not (
-            settings.PHASE0_BATCH_QUEUE_ARN
+            settings.PHASE0_SENTINEL_BATCH_QUEUE_ARN
             and settings.PHASE0_SENTINEL_JOB_DEFINITION_NAME
         ):
             return
+
+        job_def_wildcards = [
+            {"wildcard": f"*{job_def_name}*"}
+            for job_def_name in (
+                settings.PHASE0_SENTINEL_JOB_DEFINITION_NAME,
+                settings.PHASE0_LANDSAT_AC_JOB_DEFINITION_NAME,
+                settings.PHASE0_LANDSAT_TILE_JOB_DEFINITION_NAME,
+            )
+        ]
 
         self.phase0_job_events_rule = events.Rule(
             self,
@@ -511,14 +520,12 @@ class HlsStack(Stack):
             event_pattern=events.EventPattern(
                 source=["aws.batch"],
                 detail={
-                    "jobQueue": [settings.PHASE0_BATCH_QUEUE_ARN],
-                    "jobDefinition": [
-                        {
-                            "wildcard": (
-                                f"*{settings.PHASE0_SENTINEL_JOB_DEFINITION_NAME}*"
-                            )
-                        }
+                    "jobQueue": [
+                        settings.PHASE0_SENTINEL_BATCH_QUEUE_ARN,
+                        settings.PHASE0_LANDSAT_AC_BATCH_QUEUE_ARN,
+                        settings.PHASE0_LANDSAT_TILE_BATCH_QUEUE_ARN,
                     ],
+                    "jobDefinition": job_def_wildcards,
                     "status": ["FAILED", "SUCCEEDED"],
                 },
             ),
@@ -561,6 +568,4 @@ class HlsStack(Stack):
         that SymlinkTextInputFormat reads.
         """
         bucket = settings.PROCESSING_BUCKET_NAME
-        return (
-            f"s3://{bucket}/{settings.INVENTORY_PREFIX}{bucket}/{inventory_id}/hive/"
-        )
+        return f"s3://{bucket}/{settings.INVENTORY_PREFIX}{bucket}/{inventory_id}/hive/"

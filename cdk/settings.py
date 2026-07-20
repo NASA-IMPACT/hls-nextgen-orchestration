@@ -164,18 +164,21 @@ class StackSettings(BaseSettings):
     ATHENA_OUTPUTS_TABLE_NAME: str = "outputs_inventory"
     ATHENA_OUTPUTS_VIEW_NAME: str = "current_outputs"
 
-    # ----- Phase 0 shadow observability (Sentinel-2 only)
-    # Set these to shadow the existing Step Functions Sentinel-2 AC Batch jobs.
-    # Landsat (AC + tile) is out of scope for Phase 0.
-    # Both must be set together or not at all.
-    PHASE0_BATCH_QUEUE_ARN: str | None = None
+    # ----- Phase 0 shadow observability
+    # Set these to shadow the existing Batch jobs.
+    PHASE0_SENTINEL_BATCH_QUEUE_ARN: str | None = None
     PHASE0_SENTINEL_JOB_DEFINITION_NAME: str | None = None
+    PHASE0_LANDSAT_AC_BATCH_QUEUE_ARN: str | None = None
+    PHASE0_LANDSAT_AC_JOB_DEFINITION_NAME: str | None = None
+    PHASE0_LANDSAT_TILE_BATCH_QUEUE_ARN: str | None = None
+    PHASE0_LANDSAT_TILE_JOB_DEFINITION_NAME: str | None = None
 
     @model_validator(mode="after")
     def validate_phase0_settings(self) -> "StackSettings":
         defined = [
             getattr(self, k, None) is not None
-            for k in ("PHASE0_BATCH_QUEUE_ARN", "PHASE0_SENTINEL_JOB_DEFINITION_NAME")
+            for k in self.model_fields.keys()
+            if k.startswith("PHASE0_")
         ]
         if any(defined) and not all(defined):
             raise ValueError("Partial Phase 0 configuration. Set all or nothing.")

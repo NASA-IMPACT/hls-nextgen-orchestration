@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import boto3
 
@@ -37,6 +37,9 @@ _PHASE0_LANDSAT_TILE_PATHROW_KEY = "PATHROW_LIST"
 
 # Phase 1 (new orchestration) env var names
 _PHASE1_WORKFLOW_KEY = "WORKFLOW"
+
+# AWS Batch default when a job definition sets no awslogs-group
+_DEFAULT_LOG_GROUP = "/aws/batch/job"
 
 
 class JobChangeEvent(TypedDict):
@@ -98,6 +101,36 @@ class JobDetails:
     @property
     def status_reason(self) -> str:
         return cast(str, self.detail.get("statusReason", ""))
+
+    @property
+    def log_group_name(self) -> str | None:
+        """CloudWatch Logs group the job writes to.
+
+        Returns None for job definitions using a non-awslogs driver, which
+        do not ship container output to CloudWatch Logs at all.
+        """
+        config = cast(
+            "dict[str, Any]",
+            self.detail.get("container", {}).get("logConfiguration", {}),
+        )
+        if config and config.get("logDriver") != "awslogs":
+            return None
+        return cast(
+            str, config.get("options", {}).get("awslogs-group", _DEFAULT_LOG_GROUP)
+        )
+
+    @property
+    def log_stream_name(self) -> str | None:
+        """CloudWatch Logs stream for the most recent container attempt."""
+        stream = self.detail.get("container", {}).get("logStreamName")
+        if stream:
+            return cast(str, stream)
+        attempts = self.detail.get("attempts", [])
+        if attempts:
+            return cast(
+                "str | None", attempts[-1].get("container", {}).get("logStreamName")
+            )
+        return None
 
     @property
     def created_at(self) -> str:

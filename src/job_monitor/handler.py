@@ -57,8 +57,10 @@ def job_monitor(
         shadow = True
 
     logger.info(
-        "job_id=%s state=%s workflow=%s shadow=%s",
+        "job_id=%s log_group=%s log_stream=%s state=%s workflow=%s shadow=%s",
         details.job_id,
+        details.log_group_name,
+        details.log_stream_name,
         state.name,
         event.workflow,
         shadow,
@@ -70,6 +72,8 @@ def job_monitor(
         state=state.name,
         ts=details.stopped_at,
         batch_job_id=details.job_id,
+        log_group_name=details.log_group_name,
+        log_stream_name=details.log_stream_name,
         exit_code=details.exit_code,
     )
 
@@ -80,6 +84,8 @@ def job_monitor(
                 state=ProcessingState.SUBMITTED.name,
                 ts=details.created_at,
                 batch_job_id=details.job_id,
+                log_group_name=details.log_group_name,
+                log_stream_name=details.log_stream_name,
             )
             store.append_canonical_event(
                 source_granule_id=src_id,

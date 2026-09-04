@@ -13,7 +13,13 @@ from pytest_lazy_fixtures import lf
 
 from common import ProcessingState
 from common.aws_batch import AwsBatchClient, JobDetails
-from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR, SAFE_ID
+from tests.conftest import (
+    ACQUISITION_DATE,
+    GRANULE_ID_STR,
+    LOG_GROUP_NAME,
+    LOG_STREAM_NAME,
+    SAFE_ID,
+)
 
 
 class TestJobDetails:
@@ -38,6 +44,45 @@ class TestJobDetails:
     )
     def test_exit_code(self, detail: JobDetailTypeDef, exit_code: int | None) -> None:
         assert JobDetails(detail).exit_code == exit_code
+
+    @pytest.mark.parametrize(
+        "detail",
+        [lf("job_detail_failed_error"), lf("job_detail_failed_spot")],
+    )
+    def test_log_stream_name(self, detail: JobDetailTypeDef) -> None:
+        assert JobDetails(detail).log_stream_name == LOG_STREAM_NAME
+
+    def test_log_group_name(self, job_detail_failed_error: JobDetailTypeDef) -> None:
+        assert JobDetails(job_detail_failed_error).log_group_name == LOG_GROUP_NAME
+
+    def test_log_group_name_defaults_when_unset(
+        self, job_detail_failed_error: JobDetailTypeDef
+    ) -> None:
+        detail = deepcopy(job_detail_failed_error)
+        del detail["container"]["logConfiguration"]
+        assert JobDetails(detail).log_group_name == "/aws/batch/job"
+
+    def test_log_group_name_none_for_non_awslogs_driver(
+        self, job_detail_failed_error: JobDetailTypeDef
+    ) -> None:
+        detail = deepcopy(job_detail_failed_error)
+        detail["container"]["logConfiguration"] = {"logDriver": "splunk", "options": {}}
+        assert JobDetails(detail).log_group_name is None
+
+    def test_log_stream_name_falls_back_to_attempts(
+        self, job_detail_failed_spot: JobDetailTypeDef
+    ) -> None:
+        detail = deepcopy(job_detail_failed_spot)
+        del detail["container"]["logStreamName"]
+        assert JobDetails(detail).log_stream_name == LOG_STREAM_NAME
+
+    def test_log_stream_name_missing(
+        self, job_detail_failed_error: JobDetailTypeDef
+    ) -> None:
+        detail = deepcopy(job_detail_failed_error)
+        del detail["container"]["logStreamName"]
+        detail["attempts"] = []
+        assert JobDetails(detail).log_stream_name is None
 
     def test_get_job_state_success(self, job_detail_success: JobDetailTypeDef) -> None:
         assert JobDetails(job_detail_success).get_job_state() == ProcessingState.SUCCESS

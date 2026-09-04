@@ -215,6 +215,10 @@ def batch_job_definition(monkeypatch: pytest.MonkeyPatch) -> str:
 # ---------------------------------------------------------------------------
 
 
+LOG_STREAM_NAME = "test-job-definition/default/abcdef0123456789abcdef0123456789"
+LOG_GROUP_NAME = "hls-nextgen-orchestration-processing-dev"
+
+
 def _make_job_detail(
     exit_code: int | None,
     status_reason: str = "Essential container in task exited",
@@ -235,6 +239,16 @@ def _make_job_detail(
     container: dict = {
         "environment": container_env,
         "exitCode": exit_code,
+        "logStreamName": LOG_STREAM_NAME,
+        "logConfiguration": {
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-group": LOG_GROUP_NAME,
+                "awslogs-region": "us-west-2",
+                "awslogs-stream-prefix": "job",
+            },
+            "secretOptions": [],
+        },
     }
     if exit_code is None:
         del container["exitCode"]
@@ -250,7 +264,8 @@ def _make_job_detail(
             "createdAt": created_at,
             "stoppedAt": stopped_at,
             "attempts": [
-                {"container": {"exitCode": exit_code}} for _ in range(attempts)
+                {"container": {"exitCode": exit_code, "logStreamName": LOG_STREAM_NAME}}
+                for _ in range(attempts)
             ],
             "retryStrategy": {"attempts": max_attempts},
             "container": container,

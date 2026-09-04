@@ -30,7 +30,10 @@ from .athena_common import (
 )
 
 # events[] struct — matches ProcessingEventRecord fields
-_EVENTS_TYPE = "array<struct<state:string,ts:string,batch_job_id:string,exit_code:int>>"
+_EVENTS_TYPE = (
+    "array<struct<state:string,ts:string,batch_job_id:string,"
+    "log_group_name:string,log_stream_name:string,exit_code:int>>"
+)
 
 # workflow and acquisition_date are partition keys — excluded from body columns
 _COLUMNS = [

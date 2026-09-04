@@ -22,6 +22,8 @@ class ProcessingEventRecord:
     state: str
     ts: str  # ISO-8601 timestamp
     batch_job_id: str | None = None
+    log_group_name: str | None = None
+    log_stream_name: str | None = None
     exit_code: int | None = None
 
     def to_dict(self) -> dict[str, Any]:

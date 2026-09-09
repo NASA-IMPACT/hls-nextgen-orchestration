@@ -1,17 +1,21 @@
-"""HLS-VI historical processing job monitor.
+"""HLS NextGen job monitor Lambda.
 
-This Lambda monitors and potentially reroutes jobs from AWS Batch for a few scenarios,
+Consumes EventBridge Batch job state change events (SUCCEEDED / FAILED) and:
 
-* Failures that are retriable (e.g., SPOT interruptions)
-    * Routing: Retriable failures go into the requeuer queue for requeueing
-    * Logging: Job details are logged to S3
-* Failures that are not retriable (e.g., a bug in our code)
-    * Routing: These failures need manual intervention and go directly into the DLQ
-    * Logging: Job details are logged to S3
-* Successes
-    * Routing: These jobs are complete! No further steps are taken.
-    * Logging: Job details are logged to S3
+  - Determines outcome (SUCCESS, CLOUDY, LOW_SUN_ANGLE, FAILURE_RETRYABLE,
+    FAILURE_NONRETRYABLE) from the exit code / status reason.
+  - Writes a canonical record (append-only events array) and a state pointer
+    for each source granule.
+  - Writes an output index entry for all terminal states.
+  - Routes FAILURE_RETRYABLE (on final Batch attempt) → SQS retry queue.
+  - Routes FAILURE_NONRETRYABLE → SQS failure DLQ.
 
+Supports two operating modes detected from Batch job env vars:
+
+  Phase 1 (WORKFLOW env var present): full orchestration, new env vars.
+  Phase 0 (shadow): existing Step Functions system, old env vars, records
+    marked shadow=True.  Lifecycle reconstructed from job.createdAt /
+    job.stoppedAt.
 """
 
 import logging
@@ -23,14 +27,13 @@ import boto3
 from common import (
     JobChangeEvent,
     JobDetails,
+    ProcessingEventRecord,
     ProcessingState,
+    S3RecordStore,
 )
-from common.granule_logger import GranuleLoggerService
 
 logger = logging.getLogger(__name__)
-if logger.hasHandlers():
-    logger.setLevel(logging.INFO)
-else:
+if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
 
@@ -38,86 +41,125 @@ def job_monitor(
     *,
     job_change_event: JobChangeEvent,
     logs_bucket: str,
-    logs_prefix: str,
     retry_queue_url: str,
     failure_dlq_url: str,
 ) -> None:
-    """Handle job failure and success state change events
-
-    All job outcomes (successes, failures, and retryable failures) are logged.
-
-    Retryable failures (e.g., Spot interruptions) are re-routed to a queue for the
-    "requeuer" to pickup when the failure is on the last attempt of the
-    JobDefinition's retry strategy.
-
-    Non-retryable failures (non-zero exit codes) are routed to a DLQ for triage
-    and redriving into the "requeuer"'s queue.
-
-    Parameters
-    ----------
-    job_change_event:
-        AWS Batch job change event details (similar to "DescribeJob" response).
-    logs_bucket:
-        Push job attempt logs to this bucket.
-    logs_prefix:
-        Push job attempt logs to the bucket under this prefix.
-    retry_queue_url:
-        Publish failed & retryable granule processing events to this queue for
-        requeuing.
-    failure_dlq_url:
-        Publish failed, nonretryable granule processing events to this queue
-        for manual inspection.
-    """
+    """Handle Batch job state-change events."""
     sqs = boto3.client("sqs")
-
     details = JobDetails(job_change_event["detail"])
-
-    granule_event = details.get_granule_event()
     state = details.get_job_state()
-    logger.info(f"AWS Batch job id={details.job_id} was {state}")
 
-    granule_logger = GranuleLoggerService(
-        bucket=logs_bucket,
-        logs_prefix=logs_prefix,
+    if details.is_phase1_job():
+        event = details.get_granule_event()
+        shadow = False
+    else:
+        event = details.get_shadow_granule_event()
+        shadow = True
+
+    logger.info(
+        "job_id=%s log_group=%s log_stream=%s state=%s workflow=%s shadow=%s",
+        details.job_id,
+        details.log_group_name,
+        details.log_stream_name,
+        state.name,
+        event.workflow,
+        shadow,
     )
-    granule_logger.put_event_details(details)
 
-    if state == ProcessingState.FAILURE_RETRYABLE:
-        if details.job_attempts == details.max_attempts:
+    store = S3RecordStore(bucket=logs_bucket)
+
+    terminal_event = ProcessingEventRecord(
+        state=state.name,
+        ts=details.stopped_at,
+        batch_job_id=details.job_id,
+        log_group_name=details.log_group_name,
+        log_stream_name=details.log_stream_name,
+        exit_code=details.exit_code,
+    )
+
+    for src_id in event.source_granule_ids:
+        if shadow:
+            # Reconstruct SUBMITTED event from job creation timestamp
+            submitted_event = ProcessingEventRecord(
+                state=ProcessingState.SUBMITTED.name,
+                ts=details.created_at,
+                batch_job_id=details.job_id,
+                log_group_name=details.log_group_name,
+                log_stream_name=details.log_stream_name,
+            )
+            store.append_canonical_event(
+                source_granule_id=src_id,
+                output_granule_id=event.output_granule_id,
+                workflow=event.workflow,
+                acquisition_date=event.acquisition_date,
+                attempt=event.attempt,
+                event=submitted_event,
+                batch_job_id=details.job_id,
+                shadow=True,
+            )
+
+        store.append_canonical_event(
+            source_granule_id=src_id,
+            output_granule_id=event.output_granule_id,
+            workflow=event.workflow,
+            acquisition_date=event.acquisition_date,
+            attempt=event.attempt,
+            event=terminal_event,
+            batch_job_id=details.job_id,
+            shadow=shadow,
+        )
+        store.write_state_pointer(
+            workflow=event.workflow,
+            acquisition_date=event.acquisition_date,
+            source_granule_id=src_id,
+            attempt=event.attempt,
+            new_state=state,
+            old_state=ProcessingState.SUBMITTED,
+            output_granule_id=event.output_granule_id,
+        )
+
+    if state.is_terminal():
+        store.write_output_index(
+            workflow=event.workflow,
+            acquisition_date=event.acquisition_date,
+            output_granule_id=event.output_granule_id,
+            state=state,
+        )
+
+    if not shadow:
+        if state == ProcessingState.FAILURE_RETRYABLE:
+            if details.job_attempts == details.max_attempts:
+                sqs.send_message(
+                    QueueUrl=retry_queue_url,
+                    MessageBody=event.to_json(),
+                    MessageAttributes={
+                        "FailureType": {
+                            "StringValue": "RETRYABLE",
+                            "DataType": "String",
+                        }
+                    },
+                )
+            else:
+                logger.info(
+                    "Retryable failure attempt=%d/%d; AWS Batch will retry internally.",
+                    details.job_attempts,
+                    details.max_attempts,
+                )
+        elif state == ProcessingState.FAILURE_NONRETRYABLE:
             sqs.send_message(
-                QueueUrl=retry_queue_url,
-                MessageBody=granule_event.to_json(),
+                QueueUrl=failure_dlq_url,
+                MessageBody=event.to_json(),
                 MessageAttributes={
-                    "FailureType": {
-                        "StringValue": "RETRYABLE",
-                        "DataType": "String",
-                    }
+                    "FailureType": {"StringValue": "NONRETRYABLE", "DataType": "String"}
                 },
             )
-        else:
-            logger.info(
-                f"Ignoring retryable failure on attempt={details.job_attempts} which "
-                f"will be retried for a maximum of {details.max_attempts} attempts. "
-            )
-    elif state == ProcessingState.FAILURE_NONRETRYABLE:
-        sqs.send_message(
-            QueueUrl=failure_dlq_url,
-            MessageBody=granule_event.to_json(),
-            MessageAttributes={
-                "FailureType": {
-                    "StringValue": "NONRETRYABLE",
-                    "DataType": "String",
-                }
-            },
-        )
 
 
 def handler(event: JobChangeEvent, context: Any) -> None:
-    """Event handler for AWS Batch "job state change" events"""
-    return job_monitor(
+    """Lambda entry point for AWS Batch job state change events."""
+    job_monitor(
         job_change_event=event,
         logs_bucket=os.environ["PROCESSING_BUCKET_NAME"],
-        logs_prefix=os.environ.get("PROCESSING_BUCKET_LOG_PREFIX", "logs"),
         retry_queue_url=os.environ["JOB_RETRY_QUEUE_URL"],
         failure_dlq_url=os.environ["JOB_FAILURE_DLQ_URL"],
     )

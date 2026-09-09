@@ -1,7 +1,7 @@
 import datetime as dt
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal
 
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -18,9 +18,54 @@ class StackSettings(BaseSettings):
     STACK_NAME: str
     STAGE: Literal["dev", "prod"]
 
+    @model_validator(mode="before")
+    @classmethod
+    def apply_stage_defaults(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "STAGE" not in data:
+                raise ValueError("STAGE is required")
+            stage = data["STAGE"]
+
+            if not data.get("STACK_NAME"):
+                data["STACK_NAME"] = f"hls-nextgen-orchestration-{stage}"
+
+            if not data.get("ANCILLARY_TRIGGER_QUEUE_NAME"):
+                data["ANCILLARY_TRIGGER_QUEUE_NAME"] = (
+                    f"hls-orch-ancillary-queue-{stage}"
+                )
+
+            if not data.get("ANCILLARY_SUBMIT_QUEUE_NAME"):
+                data["ANCILLARY_SUBMIT_QUEUE_NAME"] = (
+                    f"hls-orch-ancillary-submit-{stage}"
+                )
+
+            if not data.get("ANCILLARY_SUBMIT_DLQ_NAME"):
+                data["ANCILLARY_SUBMIT_DLQ_NAME"] = (
+                    f"hls-orch-ancillary-submit-dlq-{stage}"
+                )
+
+            if not data.get("ATHENA_DATABASE_NAME"):
+                data["ATHENA_DATABASE_NAME"] = f"hls-nextgen-orchestration-{stage}"
+
+            if not data.get("JOB_RETRY_QUEUE_NAME"):
+                data["JOB_RETRY_QUEUE_NAME"] = f"hls-orch-retry-{stage}"
+
+            if not data.get("JOB_FAILURE_DLQ_NAME"):
+                data["JOB_FAILURE_DLQ_NAME"] = f"hls-orch-failure-{stage}"
+
+            if not data.get("GRANULE_INIT_QUEUE_NAME"):
+                data["GRANULE_INIT_QUEUE_NAME"] = f"hls-orch-granule-init-{stage}"
+
+            if not data.get("GRANULE_INIT_DLQ_NAME"):
+                data["GRANULE_INIT_DLQ_NAME"] = (
+                    f"hls-orch-granule-init-dlq-{stage}"
+                )
+
+        return data
+
     MCP_ACCOUNT_ID: str
     MCP_ACCOUNT_REGION: str = "us-west-2"
-    MCP_IAM_PERMISSION_BOUNDARY_ARN: Optional[str] = None
+    MCP_IAM_PERMISSION_BOUNDARY_ARN: str | None = None
 
     VPC_ID: str
 
@@ -34,38 +79,23 @@ class StackSettings(BaseSettings):
     # Whether to enable use and scheduling of credential rotation.
 
     # ----- Buckets
-    # Job processing bucket for state (inventories, failures, etc)
     PROCESSING_BUCKET_NAME: str
-    # LPDAAC granule inventories prefix
-    PROCESSING_BUCKET_GRANULE_INVENTORY_PREFIX: Annotated[
-        str, BeforeValidator(include_trailing_slash)
-    ] = "granule-inventories/"
-    # Granule processing event logs prefix
-    PROCESSING_BUCKET_LOG_PREFIX: Annotated[
-        str, BeforeValidator(include_trailing_slash)
-    ] = "logs/"
-    # Prefix for S3 inventories of granule processing logs
-    PROCESSING_BUCKET_LOGS_INVENTORY_PREFIX: Annotated[
-        str, BeforeValidator(include_trailing_slash)
-    ] = "logs-inventories/"
 
     SENTINEL_BUCKET_NAME: str
 
     AUX_DATA_BUCKET_NAME: str
 
-    # Output bucket for FMASK output files
-    FMASK_OUTPUT_BUCKET_NAME: str
+    # Output bucket for processed products
+    OUTPUT_BUCKET_NAME: str
 
     # Debug bucket (optional, but useful for avoiding triggering LPDAAC ingest)
     DEBUG_BUCKET_NAME: str | None = None
 
     # ----- HLS processing
-    FMASK_CONTAINER_ECR_URI: str
+    SENTINEL_CONTAINER_ECR_URI: str
     # Job vCPU and memory limits
-    FMASK_JOB_VCPU: int = 1
-    FMASK_JOB_MEMORY_MB: int = 2_000
-    # Custom log group (otherwise they'll land in the catch-all AWS Batch log group)
-    PROCESSING_LOG_GROUP_NAME: str
+    SENTINEL_JOB_VCPU: int = 1
+    SENTINEL_JOB_MEMORY_MB: int = 2_000
     # Number of internal AWS Batch job retries
     PROCESSING_JOB_RETRY_ATTEMPTS: int = 3
 
@@ -73,8 +103,12 @@ class StackSettings(BaseSettings):
     # If using SSM to resolve the AMI ID, prefix with `resolve:ssm`.
     # MCP_AMI_ID: str = "resolve:ssm:/mcp/amis/aml2023-ecs"
     MCP_AMI_ID: str = (
-        "resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id"
+        "resolve:ssm:/aws/service/ecs/optimized-ami"
+        "/amazon-linux-2023/recommended/image_id"
     )
+
+    # Base name for Batch resources; JobQueue are named ``{BATCH_BASE_NAME}-{STAGE}``
+    BATCH_BASE_NAME: str = "hls-orch"
 
     # Cluster instance classes
     BATCH_INSTANCE_CLASSES: list[str] = [
@@ -96,8 +130,70 @@ class StackSettings(BaseSettings):
     # Failed AWS Batch jobs go to a DLQ that can redrive to the retry queue
     JOB_FAILURE_DLQ_NAME: str
 
-    # ----- Logs inventory Athena database
-    ATHENA_LOGS_DATABASE_NAME: str
-    ATHENA_LOGS_S3_INVENTORY_TABLE_START_DATETIME: dt.datetime
-    ATHENA_LOGS_S3_INVENTORY_TABLE_NAME: str = "logs_s3_inventories"
-    ATHENA_LOGS_GRANULE_PROCESSING_EVENTS_VIEW_NAME: str = "granule_processing_events"
+    # ----- Granule-init trigger
+    # SQS queue that receives S3 event notifications from the sentinel bucket
+    GRANULE_INIT_QUEUE_NAME: str
+    # DLQ for poison messages the granule-init Lambda cannot process
+    GRANULE_INIT_DLQ_NAME: str
+
+    # ----- Ancillary trigger
+    # SQS queue that receives S3 event notifications from the aux data bucket
+    ANCILLARY_TRIGGER_QUEUE_NAME: str
+    # Internal SQS queue for per-granule submission work fanned out from the trigger
+    ANCILLARY_SUBMIT_QUEUE_NAME: str
+    # DLQ for the ancillary-submit queue
+    ANCILLARY_SUBMIT_DLQ_NAME: str
+
+    # ----- Daily S3 Inventories (state/ and outputs/ prefixes -> Parquet)
+    # All inventories share one destination root. S3 writes each report under
+    # {INVENTORY_PREFIX}{source-bucket}/{inventory-id}/, so the per-inventory id
+    # namespaces the reports and one lifecycle rule / grant covers them all.
+    INVENTORY_PREFIX: Annotated[str, BeforeValidator(include_trailing_slash)] = (
+        "inventories/"
+    )
+    # Inventory ids match the source prefix each one covers (state/, outputs/).
+    STATE_INVENTORY_ID: str = "state"
+    OUTPUTS_INVENTORY_ID: str = "outputs"
+
+    # ----- Athena database (shared by records and state tables)
+    ATHENA_DATABASE_NAME: str
+
+    # ----- Records Athena database
+    ATHENA_RECORDS_TABLE_START_DATE: str = "2013-01-01"
+    ATHENA_RECORDS_TABLE_NAME: str = "records"
+    ATHENA_RECORDS_TWIN_VIEW_NAME: str = "granule_twin_status"
+
+    # ----- State Athena database (S3 inventory over state/ prefix)
+    # The time-of-day MUST match the hour S3 delivers the daily inventory
+    # (observed 01:00 UTC). Daily partition projection steps by 24h from this
+    # anchor, so a mismatched hour would project partitions that never exist.
+    ATHENA_STATE_TABLE_START_DATETIME: dt.datetime = dt.datetime(2026, 5, 1, 1, 0)
+    ATHENA_STATE_TABLE_NAME: str = "state_inventory"
+    ATHENA_STATE_VIEW_NAME: str = "current_granule_states"
+
+    # ----- Outputs Athena database (S3 inventory over outputs/ prefix)
+    # See ATHENA_STATE_TABLE_START_DATETIME for why the hour must match the
+    # S3 inventory delivery time (observed 01:00 UTC).
+    ATHENA_OUTPUTS_TABLE_START_DATETIME: dt.datetime = dt.datetime(2026, 5, 1, 1, 0)
+    ATHENA_OUTPUTS_TABLE_NAME: str = "outputs_inventory"
+    ATHENA_OUTPUTS_VIEW_NAME: str = "current_outputs"
+
+    # ----- Phase 0 shadow observability
+    # Set these to shadow the existing Batch jobs.
+    PHASE0_SENTINEL_BATCH_QUEUE_ARN: str | None = None
+    PHASE0_SENTINEL_JOB_DEFINITION_NAME: str | None = None
+    PHASE0_LANDSAT_AC_BATCH_QUEUE_ARN: str | None = None
+    PHASE0_LANDSAT_AC_JOB_DEFINITION_NAME: str | None = None
+    PHASE0_LANDSAT_TILE_BATCH_QUEUE_ARN: str | None = None
+    PHASE0_LANDSAT_TILE_JOB_DEFINITION_NAME: str | None = None
+
+    @model_validator(mode="after")
+    def validate_phase0_settings(self) -> "StackSettings":
+        defined = [
+            getattr(self, k, None) is not None
+            for k in self.model_fields.keys()
+            if k.startswith("PHASE0_")
+        ]
+        if any(defined) and not all(defined):
+            raise ValueError("Partial Phase 0 configuration. Set all or nothing.")
+        return self

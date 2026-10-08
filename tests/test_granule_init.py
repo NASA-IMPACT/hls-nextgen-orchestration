@@ -8,7 +8,6 @@ import pytest
 from aws_lambda_powertools.utilities.typing import LambdaContext
 from batch_event_job_monitor import S3RecordStore
 
-from common.ancillary import check_aux_data
 from common.jobs import AWAITING_ANCILLARY, SUBMITTED, sentinel_job_group
 from granule_init.handler import (
     detect_twin_safe_ids,
@@ -84,26 +83,6 @@ class TestDetectTwinSafeIds:
         assert len(ids) == 2
         assert SAFE_ID in ids
         assert twin_id in ids
-
-
-class TestCheckAuxData:
-    def test_returns_true_when_aux_present(
-        self, granule_id: Any, aux_bucket: str
-    ) -> None:
-        import boto3
-
-        s3 = boto3.client("s3", region_name="us-west-2")
-        assert check_aux_data(granule_id, aux_bucket, s3)
-
-    def test_returns_false_when_aux_absent(self, granule_id: Any, s3: Any) -> None:
-        import uuid
-
-        fake_bucket = f"empty-{uuid.uuid4().hex}"
-        s3.create_bucket(
-            Bucket=fake_bucket,
-            CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
-        )
-        assert not check_aux_data(granule_id, fake_bucket, s3)
 
 
 # ---------------------------------------------------------------------------

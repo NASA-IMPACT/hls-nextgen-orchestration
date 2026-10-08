@@ -7,10 +7,11 @@ authors = [
   {name = "Sean Harkins", email = "sean@developmentseed.org"}
 ]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "aws-cdk-aws-lambda-python-alpha>=2.191.0a0",
     "aws-cdk-lib>=2.188.0",
+    "batch-event-job-monitor[cdk]",
     "constructs>=10.4.2",
 ]
 
@@ -19,6 +20,8 @@ members = ["src"]
 
 [tool.uv.sources]
 src = { workspace = true }
+# TODO: pin the v0.3.0 release wheel once it is published
+batch-event-job-monitor = { git = "https://github.com/NASA-IMPACT/batch-event-job-monitor", rev = "603357cc9cc41775ca3a5bfd6d4ae5000807715b" }
 
 [dependency-groups]
 dev = [
@@ -45,7 +48,7 @@ packages = ["src/common", "src/granule_init", "src/ancillary_trigger", "src/job_
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py312"
 exclude = ["cdk.out", ".venv", "node_modules"]
 
 [tool.ruff.lint]

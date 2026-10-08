@@ -2,8 +2,10 @@
 name = "src"
 version = "0.1.0"
 description = "Common modules for lambdas"
-requires-python = ">=3.11"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "batch-event-job-monitor",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -11,6 +13,10 @@ dev = [
     "aws-lambda-powertools>=3.3.0",
     "aws-xray-sdk",
 ]
+
+[tool.uv.sources]
+# TODO: pin the v0.3.0 release wheel once it is published
+batch-event-job-monitor = { git = "https://github.com/NASA-IMPACT/batch-event-job-monitor", rev = "603357cc9cc41775ca3a5bfd6d4ae5000807715b" }
 
 [build-system]
 requires = ["hatchling"]

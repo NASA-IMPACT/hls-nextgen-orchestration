@@ -1,182 +1,174 @@
-"""Tests for the job_monitor Lambda."""
+"""Tests for the job monitor Lambda: BEJM's handler with the Phase 0 resolver."""
 
 import json
+from typing import Any
 
 import pytest
+from batch_event_job_monitor import JobContext, S3RecordStore
+from mypy_boto3_s3 import S3Client
 from mypy_boto3_sqs import SQSClient
 
-from common import ProcessingState, S3RecordStore
-from common.aws_batch import JobChangeEvent
-from job_monitor.handler import job_monitor
+from common.jobs import (
+    PHASE0_SENTINEL,
+    SENTINEL,
+    SUBMITTED,
+    phase0_job_type_config,
+    sentinel_job_group,
+    sentinel_job_type_config,
+)
+from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR, SAFE_ID, TWIN_SAFE_ID
+
+_QUEUE = "arn:aws:batch:us-west-2:123456789012:job-queue/hls-orch-dev"
+_JOB_DEFINITION = "arn:aws:batch:us-west-2:123456789012:job-definition/sentinel-ac"
+_PHASE0_QUEUE = "arn:aws:batch:us-west-2:123456789012:job-queue/phase0"
+_PHASE0_JOB_DEFINITION = "arn:aws:batch:us-west-2:123456789012:job-definition/old"
+
+JOB_GROUP = sentinel_job_group(
+    acquisition_date=ACQUISITION_DATE,
+    source_granule_ids=[SAFE_ID, TWIN_SAFE_ID],
+    output_granule_id=GRANULE_ID_STR,
+)
 
 
 @pytest.fixture
-def store(bucket: str) -> S3RecordStore:
-    return S3RecordStore(bucket=bucket)
+def handler(
+    bucket: str,
+    retry_queue: str,
+    failure_dlq: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Any:
+    configs = {
+        SENTINEL: sentinel_job_type_config(
+            job_queue_arn=_QUEUE, job_definition_arn=_JOB_DEFINITION, max_attempts=3
+        ),
+        PHASE0_SENTINEL: phase0_job_type_config(
+            job_queue_arn=_PHASE0_QUEUE, job_definition_arn=_PHASE0_JOB_DEFINITION
+        ),
+    }
+    monkeypatch.setenv(
+        "PROCESSING_JOB_TYPE_CONFIGS",
+        json.dumps({job_type: c.to_dict() for job_type, c in configs.items()}),
+    )
+    from job_monitor.handler import handler
+
+    return handler
 
 
-def _run(
-    event: JobChangeEvent, bucket: str, retry_queue: str, failure_dlq: str
-) -> None:
-    job_monitor(
-        job_change_event=event,
-        logs_bucket=bucket,
-        retry_queue_url=retry_queue,
-        failure_dlq_url=failure_dlq,
+def _event(
+    status: str,
+    *,
+    job_id: str = "job-1",
+    exit_code: int | None = None,
+    parameters: dict[str, str] | None = None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    container: dict[str, Any] = {
+        "environment": [{"name": k, "value": v} for k, v in (env or {}).items()]
+    }
+    if exit_code is not None:
+        container["exitCode"] = exit_code
+    return {
+        "time": "2025-04-23T19:01:54Z",
+        "detail": {
+            "jobId": job_id,
+            "jobName": "test-job",
+            "jobQueue": _QUEUE if parameters else _PHASE0_QUEUE,
+            "jobDefinition": f"{_JOB_DEFINITION}:3",
+            "status": status,
+            "createdAt": 1745434620000,
+            "parameters": parameters or {},
+            "container": container,
+        },
+    }
+
+
+def _record(s3: S3Client, store: S3RecordStore, context: JobContext) -> Any:
+    body = s3.get_object(Bucket=store.bucket, Key=store.canonical_key(context))["Body"]
+    return json.loads(body.read())
+
+
+def _messages(sqs: SQSClient, queue_url: str) -> list[Any]:
+    return sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10).get(
+        "Messages", []
     )
 
 
-# ---------------------------------------------------------------------------
-# Phase 1 (new orchestration, WORKFLOW env var present)
-# ---------------------------------------------------------------------------
-
-
-class TestPhase1:
-    def test_success_writes_canonical_and_pointer(
-        self,
-        event_job_success: JobChangeEvent,
-        store: S3RecordStore,
-        sqs: SQSClient,
-        retry_queue: str,
-        failure_dlq: str,
+class TestSentinelJobs:
+    def test_records_each_granule_and_clears_the_claim(
+        self, handler: Any, store: S3RecordStore, s3: S3Client
     ) -> None:
-        _run(event_job_success, store.bucket, retry_queue, failure_dlq)
+        for context in JOB_GROUP.contexts():
+            store.write_state_pointer_conditional(context=context, state=SUBMITTED)
 
-        from tests.conftest import ACQUISITION_DATE, SAFE_ID
+        event = _event("RUNNING", parameters=JOB_GROUP.to_batch_parameters())
+        assert handler(event, None) == {"state": "AWAITING"}
 
-        key = S3RecordStore.canonical_key("sentinel", ACQUISITION_DATE, SAFE_ID, 0)
-        s3 = __import__("boto3").client("s3", region_name="us-west-2")
-        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
-        assert record["current_state"] == "SUCCESS"
-        assert len(record["events"]) == 1
-        assert record["shadow"] is False
+        for context in JOB_GROUP.contexts():
+            assert _record(s3, store, context)["current_state"] == "AWAITING"
+            key = store.state_pointer_key(SUBMITTED, context)
+            assert not s3.list_objects_v2(Bucket=store.bucket, Prefix=key).get(
+                "KeyCount"
+            )
 
-    def test_success_writes_output_index(
+    @pytest.mark.parametrize(
+        ["exit_code", "state"], [(3, "LOW_SUN_ANGLE"), (4, "CLOUDY")]
+    )
+    def test_expected_outcomes_are_not_dead_lettered(
         self,
-        event_job_success: JobChangeEvent,
-        store: S3RecordStore,
+        handler: Any,
         sqs: SQSClient,
-        retry_queue: str,
         failure_dlq: str,
+        exit_code: int,
+        state: str,
     ) -> None:
-        _run(event_job_success, store.bucket, retry_queue, failure_dlq)
-
-        from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR
-
-        key = S3RecordStore.output_index_key(
-            ProcessingState.SUCCESS, "sentinel", ACQUISITION_DATE, GRANULE_ID_STR
+        event = _event(
+            "FAILED", exit_code=exit_code, parameters=JOB_GROUP.to_batch_parameters()
         )
-        s3 = __import__("boto3").client("s3", region_name="us-west-2")
-        resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=key)
-        assert resp.get("KeyCount", 0) == 1
+        assert handler(event, None) == {"state": state}
+        assert _messages(sqs, failure_dlq) == []
 
-    def test_cloudy_writes_terminal_and_output_index(
-        self,
-        event_job_cloudy: JobChangeEvent,
-        store: S3RecordStore,
-        sqs: SQSClient,
-        retry_queue: str,
-        failure_dlq: str,
+    def test_errors_are_dead_lettered(
+        self, handler: Any, sqs: SQSClient, failure_dlq: str
     ) -> None:
-        _run(event_job_cloudy, store.bucket, retry_queue, failure_dlq)
-
-        from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR, SAFE_ID
-
-        key = S3RecordStore.canonical_key("sentinel", ACQUISITION_DATE, SAFE_ID, 0)
-        s3 = __import__("boto3").client("s3", region_name="us-west-2")
-        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
-        assert record["current_state"] == "CLOUDY"
-
-        idx_key = S3RecordStore.output_index_key(
-            ProcessingState.CLOUDY, "sentinel", ACQUISITION_DATE, GRANULE_ID_STR
+        event = _event(
+            "FAILED", exit_code=1, parameters=JOB_GROUP.to_batch_parameters()
         )
-        resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=idx_key)
-        assert resp.get("KeyCount", 0) == 1
+        assert handler(event, None) == {"state": "FAILURE_NONRETRYABLE"}
+        assert len(_messages(sqs, failure_dlq)) == 1
 
-        # Not routed to any queue
-        assert not sqs.receive_message(QueueUrl=retry_queue).get("Messages")
-        assert not sqs.receive_message(QueueUrl=failure_dlq).get("Messages")
 
-    def test_low_sun_angle(
-        self,
-        event_job_low_sun: JobChangeEvent,
-        store: S3RecordStore,
-        sqs: SQSClient,
-        retry_queue: str,
-        failure_dlq: str,
+class TestPhase0Jobs:
+    def _context(self, attempt: int) -> JobContext:
+        return JobContext(
+            job_type=PHASE0_SENTINEL,
+            partition_fields={"acquisition_date": ACQUISITION_DATE},
+            input_entity_id=SAFE_ID,
+            output_entity_id=GRANULE_ID_STR,
+            attempt=attempt,
+        )
+
+    def test_records_a_shadow_job(
+        self, handler: Any, store: S3RecordStore, s3: S3Client
     ) -> None:
-        _run(event_job_low_sun, store.bucket, retry_queue, failure_dlq)
+        event = _event("SUCCEEDED", env={"GRANULE_LIST": SAFE_ID})
+        assert handler(event, None) == {"state": "SUCCESS"}
+        assert _record(s3, store, self._context(1))["batch_job_id"] == "job-1"
 
-        from tests.conftest import ACQUISITION_DATE, SAFE_ID
-
-        key = S3RecordStore.canonical_key("sentinel", ACQUISITION_DATE, SAFE_ID, 0)
-        s3 = __import__("boto3").client("s3", region_name="us-west-2")
-        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
-        assert record["current_state"] == "LOW_SUN_ANGLE"
-
-    def test_nonretryable_routes_to_dlq(
-        self,
-        event_job_failed_error: JobChangeEvent,
-        store: S3RecordStore,
-        sqs: SQSClient,
-        retry_queue: str,
-        failure_dlq: str,
+    def test_a_resubmitted_shadow_job_is_the_next_attempt(
+        self, handler: Any, store: S3RecordStore, s3: S3Client
     ) -> None:
-        _run(event_job_failed_error, store.bucket, retry_queue, failure_dlq)
-        msgs = sqs.receive_message(QueueUrl=failure_dlq).get("Messages", [])
-        assert len(msgs) == 1
+        handler(_event("FAILED", exit_code=1, env={"GRANULE_LIST": SAFE_ID}), None)
+        handler(
+            _event("SUCCEEDED", job_id="job-2", env={"GRANULE_LIST": SAFE_ID}), None
+        )
+        assert _record(s3, store, self._context(2))["batch_job_id"] == "job-2"
 
-    def test_retryable_last_attempt_routes_to_retry_queue(
-        self,
-        event_job_failed_spot: JobChangeEvent,
-        store: S3RecordStore,
-        sqs: SQSClient,
-        retry_queue: str,
-        failure_dlq: str,
+    def test_failures_are_not_routed(
+        self, handler: Any, sqs: SQSClient, failure_dlq: str
     ) -> None:
-        _run(event_job_failed_spot, store.bucket, retry_queue, failure_dlq)
-        msgs = sqs.receive_message(QueueUrl=retry_queue).get("Messages", [])
-        assert len(msgs) == 1
+        event = _event("FAILED", exit_code=1, env={"GRANULE_LIST": SAFE_ID})
+        assert handler(event, None) == {"state": "FAILURE_NONRETRYABLE"}
+        assert _messages(sqs, failure_dlq) == []
 
-    def test_retryable_nonfinal_attempt_not_requeued(
-        self,
-        event_job_failed_spot_nonfinal: JobChangeEvent,
-        store: S3RecordStore,
-        sqs: SQSClient,
-        retry_queue: str,
-        failure_dlq: str,
-    ) -> None:
-        _run(event_job_failed_spot_nonfinal, store.bucket, retry_queue, failure_dlq)
-        msgs = sqs.receive_message(QueueUrl=retry_queue).get("Messages", [])
-        assert len(msgs) == 0
-
-
-# ---------------------------------------------------------------------------
-# Phase 0 (shadow mode, no WORKFLOW env var)
-# ---------------------------------------------------------------------------
-
-
-class TestPhase0Shadow:
-    def test_shadow_sentinel_writes_two_events(
-        self,
-        event_job_shadow_sentinel: JobChangeEvent,
-        store: S3RecordStore,
-        sqs: SQSClient,
-        retry_queue: str,
-        failure_dlq: str,
-    ) -> None:
-        _run(event_job_shadow_sentinel, store.bucket, retry_queue, failure_dlq)
-
-        s3 = __import__("boto3").client("s3", region_name="us-west-2")
-        # Find canonical record — we don't know the exact acquisition_date easily
-        # so just list all canonical records and check there is one
-        resp = s3.list_objects_v2(Bucket=store.bucket, Prefix="records/sentinel/")
-        assert resp.get("KeyCount", 0) == 1
-
-        key = resp["Contents"][0]["Key"]
-        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
-        # Shadow records get two events: SUBMITTED (from createdAt) + terminal
-        assert len(record["events"]) == 2
-        assert record["events"][0]["state"] == "SUBMITTED"
-        assert record["shadow"] is True
-        assert record["current_state"] == "SUCCESS"
+    def test_unrecognized_jobs_are_untracked(self, handler: Any) -> None:
+        assert handler(_event("SUCCEEDED", env={}), None) == {"state": "UNTRACKED"}

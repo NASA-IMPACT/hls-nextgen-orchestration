@@ -5,24 +5,26 @@
 - [Background & Motivation](#background--motivation)
   - [Problems with the Current Architecture](#problems-with-the-current-architecture)
   - [Prototype Validation](#prototype-validation)
-  - [Prototype Status](#prototype-status)
+  - [Implementation Status](#implementation-status)
 - [Target Architecture](#target-architecture)
   - [Core Design Principle](#core-design-principle)
   - [High-Level Components](#high-level-components)
+  - [Job Monitoring Library](#job-monitoring-library)
 - [S3 Log Schema Design](#s3-log-schema-design)
   - [Three-Object Model](#three-object-model)
   - [Output Granule ID Resolution](#output-granule-id-resolution)
-  - [Why Two Objects](#why-two-objects)
+  - [Why Three Objects](#why-three-objects)
   - [State Machine](#state-machine)
   - [Concurrency / Race Conditions](#concurrency--race-conditions)
   - [Key Recovery from Batch Events](#key-recovery-from-batch-events)
 - [Component Design](#component-design)
   - [Lambda: granule-init](#lambda-granule-init)
   - [Lambda: ancillary-trigger](#lambda-ancillary-trigger)
+  - [Lambda: ancillary-submit](#lambda-ancillary-submit)
   - [Landsat Two-Phase Workflow](#landsat-two-phase-workflow)
   - [Lambda: landsat-tile-trigger](#lambda-landsat-tile-trigger)
   - [Lambda: job-monitor](#lambda-job-monitor)
-  - [Lambda: job-requeuer](#lambda-job-requeuer)
+  - [Lambda: job-resubmit](#lambda-job-resubmit)
   - [SQS Queues](#sqs-queues)
   - [AWS Batch Configuration](#aws-batch-configuration)
   - [Analytics: Athena over S3 Inventory](#analytics-athena-over-s3-inventory)
@@ -99,32 +101,31 @@ Lambda/SQS/EventBridge components handle outcomes, and the S3 log accumulates a 
 The new HLS NextGen orchestration adapts this pattern for event-driven (not inventory-driven) processing with ancillary
 data dependencies.
 
-### Prototype Status
+### Implementation Status
 
-A further prototype, `hls-nextgen-orchestration`, has been built specifically with the HLS-VI experience in mind and
-forms the foundation of this design. It implements:
+`hls-nextgen-orchestration` implements the Sentinel-2 workflow of this design, and shadows the existing system's
+Sentinel-2 and Landsat jobs (see Implementation Sequencing). Job tracking, retries, and the Athena tables come from
+[batch-event-job-monitor](https://github.com/NASA-IMPACT/batch-event-job-monitor) (see Job Monitoring Library below);
+this repository holds the HLS-specific parts:
 
-- **`GranuleProcessingEvent`** data model with both `granule_id` (output HLS ID) and `source_granule_id` (upstream
-  SAFE/scene ID), plus `attempt` and `debug_bucket`
-- **`ProcessingState`** enum: `AWAITING`, `SUBMITTED`, `SUCCESS`, `FAILURE_RETRYABLE`, `FAILURE_NONRETRYABLE`
-- **`granule_entry` Lambda** — triggered by S3 events on the input bucket; checks ancillary readiness at arrival time
-  and either submits immediately (`SUBMITTED`) or records as waiting (`AWAITING`)
-- **`job_monitor` Lambda** — EventBridge Batch state change consumer; parses outcome and routes to retry queue or DLQ
-- **`job_requeuer` Lambda** — SQS consumer; increments attempt and resubmits
-- **Full CDK stack** — Batch compute environment, job queue, SQS queues (entry, retry, DLQ), EventBridge rule, SNS->SQS
-  subscription from input bucket
-- **`moto`-based test suite** covering all three Lambda handlers
+- **`common.jobs`** -- the job types (`sentinel`, plus the `phase0-*` types shadowing the existing system), their
+  exit-code outcomes (`CLOUDY`, `LOW_SUN_ANGLE`), the submitter states (`AWAITING_ANCILLARY`, `SUBMITTED`), and the
+  container environment every submission sets
+- **`granule_init` Lambda** -- triggered by S3 events on the input bucket; detects twin granules, checks ancillary
+  readiness at arrival time, and either submits immediately or records the granule as `AWAITING_ANCILLARY`
+- **`ancillary_trigger` / `ancillary_submit` Lambdas** -- fire when ancillary data lands; enqueue and submit the
+  granules waiting on it
+- **`job_monitor` Lambda** -- the library's monitor, with a resolver that identifies the existing system's jobs
+- **`job_resubmit` Lambda** -- resubmits retryable failures as the next attempt
+- **CDK stack** -- Batch compute environment and job queue, the library's monitoring constructs, the S3 -> SQS triggers,
+  and the Athena tables
+- **`moto`-based test suite** covering every Lambda handler
 
 **What remains to build:**
 
-- **`ancillary-trigger` Lambda** — the primary missing piece; fires when ancillary data lands and re-scans `AWAITING`
-  granules for that date (see Component Design below)
-- **`CLOUDY` and `LOW_SUN_ANGLE` terminal states** — currently collapsed into `FAILURE_NONRETRYABLE` in the prototype
-- **Two-object S3 schema** — the prototype uses a single-object HIVE-partitioned schema; this design adopts the
-  two-object model (see tradeoffs)
-- **Landsat two-phase workflow** — the prototype is Sentinel-2 only; Landsat requires `landsat-ac` (per WRS-2 scene,
-  fits existing state machine) + `landsat-tile` (mosaicking, new `landsat-tile-trigger` Lambda with event + schedule
-  triggers and MGRS-WRS-2 lookup table)
+- **Landsat two-phase workflow** -- the stack submits Sentinel-2 jobs only; Landsat requires `landsat-ac` (per WRS-2
+  scene, fits the existing state machine) + `landsat-tile` (mosaicking, new `landsat-tile-trigger` Lambda with event +
+  schedule triggers and MGRS-WRS-2 lookup table)
 
 ---
 
@@ -141,16 +142,16 @@ Inventory.
 ```mermaid
 flowchart TD
     CMR["CMR / S3 event<br>(new granule)"]
-    INIT["granule-init Lambda<br>writes canonical record<br>checks ancillary availability"]
-    WAIT["AWAITING<br>(12-36 hour wait)"]
+    INIT["granule-init Lambda<br>checks ancillary availability"]
+    WAIT["AWAITING_ANCILLARY<br>(12-36 hour wait)"]
     ANC["ancillary data<br>lands on S3"]
-    TRIG["ancillary-trigger Lambda<br>LISTs AWAITING for dated prefix<br>submits Batch jobs"]
+    TRIG["ancillary-trigger + ancillary-submit<br>LIST AWAITING_ANCILLARY for date<br>submit Batch jobs"]
     BATCH["AWS Batch<br>(Spot)"]
     EB["BatchJobStateChange<br>(EventBridge)"]
-    MON["job-monitor Lambda<br>parses exit code -> outcome<br>appends event to canonical record<br>transitions state pointer"]
+    MON["job-monitor Lambda<br>classifies each status change<br>appends event to canonical record<br>transitions state pointer"]
     SQS["SQS retry queue"]
     DLQ["SQS failure DLQ"]
-    REQUEUE["job-requeuer Lambda<br>increments attempt<br>resubmits to Batch"]
+    REQUEUE["job-resubmit Lambda<br>increments attempt<br>resubmits to Batch"]
 
     TERM_OK["SUCCESS"]
     TERM_SKIP["CLOUDY / LOW_SUN_ANGLE<br>(terminal)"]
@@ -165,11 +166,30 @@ flowchart TD
     MON -->|"exit 0"| TERM_OK
     MON -->|"known skip<br>exit code"| TERM_SKIP
     MON -->|"unexpected<br>non-zero exit"| TERM_FAIL
-    MON -->|"no exit code<br>(Spot interruption)"| SQS
+    MON -->|"no exit code (Spot interruption)<br>attempts remain"| SQS
     TERM_FAIL --> DLQ
     DLQ -.->|"manual redrive<br>after fix"| SQS
     SQS --> REQUEUE --> BATCH
 ```
+
+### Job Monitoring Library
+
+The S3 log, monitor, and retry machinery is shared with other projects (the HLS monthly composites, and the
+`hls-vi-historical-orchestration` system it was extracted from) as
+[batch-event-job-monitor](https://github.com/NASA-IMPACT/batch-event-job-monitor) (BEJM). In BEJM's terms:
+
+| This design                       | BEJM                                                                        |
+| --------------------------------- | --------------------------------------------------------------------------- |
+| workflow (`sentinel`, ...)        | `job_type`                                                                  |
+| `acquisition_date`                | the one partition field                                                     |
+| source granule IDs                | `input_entity_ids` (one canonical record + state pointer each)              |
+| output granule ID                 | `output_entity_id`                                                          |
+| `CLOUDY` / `LOW_SUN_ANGLE`        | `ExitCodeOutcomes` for exit codes 4 / 3, not dead-lettered                  |
+| `AWAITING_ANCILLARY`, `SUBMITTED` | submitter states: written by this repo's Lambdas, cleared by the monitor   |
+
+Every job this system submits carries BEJM's `bejm_*` Batch parameters, from which the monitor reconstructs its
+identity. Every monitoring object is written under one key prefix in the processing bucket (`PROCESSING_KEY_PREFIX`,
+`monitoring/` by default).
 
 ---
 
@@ -177,74 +197,82 @@ flowchart TD
 
 ### Three-Object Model
 
-Each granule attempt has up to three S3 representations with different purposes:
+Each source granule attempt has up to three S3 representations with different purposes. All keys sit under the
+processing bucket's key prefix (`monitoring/` below).
 
-**1. Canonical record** — stable key, full event history, never deleted, Athena source
+**1. Canonical record** -- stable key, full event history, never deleted, Athena source
 
 ```
-s3://BUCKET/records/{workflow}/{acquisition_date}/{source_granule_id}/{attempt}.json
+s3://BUCKET/monitoring/records/job_type={job_type}/acquisition_date={acquisition_date}/input_entity_id={source_granule_id}/{attempt:03d}.json
 ```
 
 Example:
 
 ```
-records/sentinel/2024-01-15/S2A_MSIL1C_20240115T.../001.json
+monitoring/records/job_type=sentinel/acquisition_date=2024-01-15/input_entity_id=S2A_MSIL1C_20240115T.../001.json
 ```
 
-Content: append-only event log for this attempt. `output_granule_id` is known at submission time and written immediately
-(see Output Granule ID Resolution below).
+Content: append-only log of the Batch job state changes for this attempt, each at the EventBridge event's time.
+`output_entity_id` is known at submission time (see Output Granule ID Resolution below).
 
 ```json
 {
-  "source_granule_id": "S2A_MSIL1C_20240115T...",
-  "output_granule_id": "HLS.S30.T10SEG.2024015T...",
-  "workflow": "sentinel",
-  "acquisition_date": "2024-01-15",
+  "input_entity_id": "S2A_MSIL1C_20240115T...",
+  "output_entity_id": "HLS.S30.T10SEG.2024015T...",
+  "job_type": "sentinel",
+  "partition_fields": { "acquisition_date": "2024-01-15" },
   "attempt": 1,
+  "batch_job_id": "abc-123",
   "events": [
-    { "state": "AWAITING", "ts": "2024-01-15T00:00:00Z" },
-    { "state": "SUBMITTED", "ts": "2024-01-16T12:00:00Z", "batch_job_id": "abc-123" },
-    { "state": "SUCCESS", "ts": "2024-01-16T13:10:00Z", "exit_code": 0 }
+    { "state": "AWAITING", "timestamp": "2024-01-16T12:00:05+00:00", "batch_job_id": "abc-123" },
+    { "state": "SUCCESS", "timestamp": "2024-01-16T13:10:00+00:00", "batch_job_id": "abc-123", "exit_code": 0 }
   ],
-  "current_state": "SUCCESS"
+  "current_state": "SUCCESS",
+  "log_stream_name": "sentinel-ac/default/0123456789abcdef",
+  "created_at": "2024-01-16T12:00:00+00:00",
+  "started_at": "2024-01-16T12:04:10+00:00",
+  "stopped_at": "2024-01-16T13:10:00+00:00"
 }
 ```
 
-**2. State pointer** — state-keyed prefix, minimal JSON body, write-new + delete-old on transition
+The canonical record starts at the job's first Batch event, so the wait for ancillary data before submission is visible
+only through the `AWAITING_ANCILLARY` state pointer while it lasts.
+
+**2. State pointer** -- state-keyed prefix, minimal JSON body, write-new + delete-old on transition
 
 ```
-s3://BUCKET/state/{state}/{workflow}/{acquisition_date}/{source_granule_id}/{attempt}
-```
-
-Example:
-
-```
-state/AWAITING/sentinel/2024-01-15/S2A_MSIL1C_.../001
-state/SUBMITTED/sentinel/2024-01-15/S2A_MSIL1C_.../001
-state/SUCCESS/sentinel/2024-01-15/S2A_MSIL1C_.../001
-```
-
-**3. Output index** — written for all terminal states, state in key prefix, empty body
-
-```
-s3://BUCKET/outputs/{state}/{workflow}/{acquisition_date}/{output_granule_id}
+s3://BUCKET/monitoring/state/state={state}/job_type={job_type}/acquisition_date={acquisition_date}/input_entity_id={source_granule_id}/{attempt:03d}
 ```
 
 Example:
 
 ```
-outputs/SUCCESS/sentinel/2024-01-15/HLS.S30.T10SEG.2024015T...
-outputs/CLOUDY/sentinel/2024-01-15/HLS.S30.T10SEG.2024015T...
-outputs/LOW_SUN_ANGLE/sentinel/2024-01-15/HLS.S30.T10SEG.2024015T...
-outputs/SUCCESS/landsat-tile/2024-01-15/HLS.L30.T10SEG.2024015T...
+monitoring/state/state=AWAITING_ANCILLARY/job_type=sentinel/acquisition_date=2024-01-15/input_entity_id=S2A_MSIL1C_.../001
+monitoring/state/state=AWAITING/job_type=sentinel/acquisition_date=2024-01-15/input_entity_id=S2A_MSIL1C_.../001
+monitoring/state/state=SUCCESS/job_type=sentinel/acquisition_date=2024-01-15/input_entity_id=S2A_MSIL1C_.../001
 ```
 
-Written by `job_monitor` at terminal state. `output_granule_id` is known at submission time (see Output Granule ID
-Resolution below) and encoded in Batch env vars. State in the key prefix keeps all reconciliation queries as pure key
-parsing with no body reads:
+**3. Output index** -- written for all terminal states, state in key prefix, empty body
 
-- `LIST outputs/SUCCESS/{workflow}/{date}/` -> products successfully produced (LP DAAC reconciliation)
-- `LIST outputs/CLOUDY/{workflow}/{date}/` -> granules screened out by cloud cover
+```
+s3://BUCKET/monitoring/outputs/state={state}/job_type={job_type}/acquisition_date={acquisition_date}/{output_granule_id}
+```
+
+Example:
+
+```
+monitoring/outputs/state=SUCCESS/job_type=sentinel/acquisition_date=2024-01-15/HLS.S30.T10SEG.2024015T...
+monitoring/outputs/state=CLOUDY/job_type=sentinel/acquisition_date=2024-01-15/HLS.S30.T10SEG.2024015T...
+monitoring/outputs/state=LOW_SUN_ANGLE/job_type=sentinel/acquisition_date=2024-01-15/HLS.S30.T10SEG.2024015T...
+```
+
+Written by the job monitor at terminal state, once per job. `output_granule_id` is known at submission time (see Output
+Granule ID Resolution below) and carried in the job's `bejm_output_entity_id` parameter. State in the key prefix keeps
+all reconciliation queries as pure key parsing with no body reads:
+
+- `LIST outputs/state=SUCCESS/job_type={job_type}/acquisition_date={date}/` -> products successfully produced (LP DAAC
+  reconciliation)
+- `LIST outputs/state=CLOUDY/job_type={job_type}/acquisition_date={date}/` -> granules screened out by cloud cover
 - `LIST outputs/` across all states -> full coverage picture for a date
 
 ### Output Granule ID Resolution
@@ -267,99 +295,95 @@ parsing with no body reads:
   - Intermediate WRS-2 product.
   - The `output_granule_id` is the AC output scene ID, derivable from the input scene ID and output bucket convention.
 
-Because `output_granule_id` is known before the job runs, it is encoded in the Batch job env vars at submission and
-written to the canonical record immediately. The output index entry is written by `job_monitor` at terminal state for
-all outcomes (see output index below), not only `SUCCESS`.
+Because `output_granule_id` is known before the job runs, it is set on the Batch job at submission (as the
+`bejm_output_entity_id` parameter, and the `OUTPUT_GRANULE_ID` container environment variable) and written to the
+canonical record from the job's first event. The output index entry is written by the job monitor at terminal state for
+all outcomes, not only `SUCCESS`.
 
 ### Why Three Objects
 
-| Need                                      | Canonical record                 | State pointer                                | Output index                            |
-| ----------------------------------------- | -------------------------------- | -------------------------------------------- | --------------------------------------- |
-| Scan "what's AWAITING for date D?"        | ✗ (state in body, not scannable) | ✓ `LIST state/AWAITING/sentinel/2024-01-15/` | ✗                                       |
-| Full event history for Athena             | ✓ append-only events array       | ✗ (no history)                               | ✗                                       |
-| Deterministic lookup by source granule ID | ✓ construct key directly         | ✓ construct key directly                     | ✗ (keyed by output_granule_id)          |
-| Reconciliation by output granule ID       | ✗ (keyed by source_granule_id)   | ✗ (keyed by source_granule_id)               | ✓ `LIST outputs/SUCCESS/sentinel/date/` |
-| All terminal outcomes by output granule   | ✗                                | ✗                                            | ✓ `LIST outputs/{state}/sentinel/date/` |
-| Atomic state transitions                  | N/A (overwrite in place)         | ✗ (write + delete, not atomic)               | N/A (append-only per terminal state)    |
+| Need                                      | Canonical record                 | State pointer                                         | Output index                                        |
+| ----------------------------------------- | -------------------------------- | ----------------------------------------------------- | --------------------------------------------------- |
+| Scan "what's waiting for date D?"         | ✗ (state in body, not scannable) | ✓ `LIST state/state=AWAITING_ANCILLARY/.../{date}/`   | ✗                                                   |
+| Full event history for Athena             | ✓ append-only events array       | ✗ (no history)                                        | ✗                                                   |
+| Deterministic lookup by source granule ID | ✓ construct key directly         | ✓ construct key directly                              | ✗ (keyed by output_granule_id)                      |
+| Reconciliation by output granule ID       | ✗ (keyed by source_granule_id)   | ✗ (keyed by source_granule_id)                        | ✓ `LIST outputs/state=SUCCESS/.../{date}/`          |
+| All terminal outcomes by output granule   | ✗                                | ✗                                                     | ✓ `LIST outputs/state={state}/.../{date}/`          |
+| Atomic state transitions                  | N/A (overwrite in place)         | ✗ (write + delete, not atomic)                        | N/A (append-only per terminal state)                |
 
 ### State Machine
 
 ```mermaid
 flowchart TD
-    START([granule-init]) --> AWAIT[AWAITING]
-    AWAIT -->|"ancillary arrives, job submitted"| SUB[SUBMITTED]
-    SUB -->|exit 0| OK([SUCCESS])
-    SUB -->|"exit 4 — cloud screen"| CLOUD([CLOUDY])
-    SUB -->|"exit 3 — low sun angle"| SUN([LOW_SUN_ANGLE])
-    SUB -->|no exit + Spot signal| RETRY[FAILURE_RETRYABLE]
-    SUB -->|unexpected non-zero exit| FAIL([FAILURE_NONRETRYABLE])
-    RETRY -->|"requeue, attempt+1"| AWAIT
+    START([granule-init]) -->|"ancillary missing"| WAIT[AWAITING_ANCILLARY]
+    START -->|"ancillary present"| CLAIM[SUBMITTED]
+    WAIT -->|"ancillary arrives"| CLAIM
+    CLAIM -->|"SubmitJob; first Batch event"| AWAIT[AWAITING]
+    AWAIT -->|exit 0| OK([SUCCESS])
+    AWAIT -->|"exit 4: cloud screen"| CLOUD([CLOUDY])
+    AWAIT -->|"exit 3: low sun angle"| SUN([LOW_SUN_ANGLE])
+    AWAIT -->|no exit + Spot signal| RETRY[FAILURE_RETRYABLE]
+    AWAIT -->|unexpected non-zero exit| FAIL([FAILURE_NONRETRYABLE])
+    RETRY -->|"resubmit, attempt+1"| AWAIT
 
     classDef terminal fill:#dff0d8,stroke:#3c763d
     classDef skip fill:#fcf8e3,stroke:#8a6d3b
     classDef bugbucket fill:#f2dede,stroke:#a94442
+    classDef submitter stroke-dasharray: 5 5
     class OK terminal
     class CLOUD,SUN skip
     class FAIL bugbucket
+    class WAIT,CLAIM submitter
 ```
 
-`RUNNING` is intentionally omitted — observing the transition from `SUBMITTED` to running is impractical (the job may
-exit before we'd write it) and adds complexity without operational value.
+The states have two owners:
 
-Terminal states (`SUCCESS`, `CLOUDY`, `LOW_SUN_ANGLE`, `FAILURE_NONRETRYABLE`) — state pointer kept for operational
+- **Submitter states** (dashed) -- `AWAITING_ANCILLARY` and `SUBMITTED` are written by this repository's Lambdas before
+  a job is in Batch. `SUBMITTED` is a claim, written just before calling SubmitJob. The monitor deletes both for an
+  attempt on every Batch event for that attempt, so neither outlives the job's first event.
+- **Monitor states** -- everything after submission, recorded by the job monitor from Batch job state change events.
+  `AWAITING` covers a job in Batch (`PENDING`, `RUNNABLE`, `STARTING`, `RUNNING`); a job's queue and run times are in
+  its canonical record (`created_at`, `started_at`, `stopped_at`).
+
+Terminal states (`SUCCESS`, `CLOUDY`, `LOW_SUN_ANGLE`, `FAILURE_NONRETRYABLE`) -- state pointer kept for operational
 dashboards. Canonical record always kept. Separating `CLOUDY`/`LOW_SUN_ANGLE` from `FAILURE_NONRETRYABLE` keeps the "bug
 bucket" clean: a spike in `FAILURE_NONRETRYABLE` means something broke, not just a cloudy day.
 
-`FAILURE_RETRYABLE` creates a new attempt: pointer stays for history, new `AWAITING/.../{attempt+1}` pointer written for
-the retry.
+`FAILURE_RETRYABLE` creates a new attempt: the job is resubmitted with `attempt + 1`, whose first event retires the
+previous attempt's pointer. A retryable failure on the last of `JOB_RETRY_MAX_ATTEMPTS` attempts is terminal and goes to
+the failure DLQ.
 
 ### Concurrency / Race Conditions
 
-- Ancillary trigger Lambda may fire multiple times for the same dated prefix
-- Two invocations may both see the same `available/` granule and submit duplicate jobs
-- **Mitigation**: pipeline is idempotent; duplicate jobs produce identical outputs. S3 conditional write
-  (`if-none-match`) on the `submitted/` pointer ensures only one invocation logs the submission. Sequence: submit job ->
-  write `submitted/` pointer -> delete `available/` pointer.
-- If `available/` pointer deletion fails, the next ancillary scan finds a stale pointer, submits an idempotent duplicate
-  job, and the conditional write on `submitted/` fails (already exists) -> safely ignored.
+- The ancillary trigger may fire multiple times for the same date, and S3 may deliver a granule's arrival event more
+  than once
+- **Mitigation**: every submission first claims each of the job's source granules with a conditional write
+  (`if-none-match`) of its `SUBMITTED` pointer. An invocation that loses a claim releases any claims it made and skips
+  the job. Sequence: claim (`SUBMITTED`) -> SubmitJob -> delete `AWAITING_ANCILLARY`. A failed SubmitJob releases the
+  claims, leaving the granules for a later attempt.
+- If deleting `AWAITING_ANCILLARY` fails, the monitor deletes it on the job's first Batch event.
+- EventBridge does not guarantee delivery order. The monitor appends every event to the canonical record, but never
+  moves a state pointer backwards or resurrects an attempt a newer one has superseded.
 
 ### Key Recovery from Batch Events
 
-All keying information is embedded in Batch job environment variables at submission time. The job-monitor Lambda
-reconstructs the S3 key from the Batch job detail without scanning:
+All keying information is set on the Batch job at submission, as BEJM's `bejm_*` parameters
+(`JobGroup.to_batch_parameters()`), which AWS Batch echoes back in every job state change event. The job monitor
+reconstructs every S3 key from the event without scanning:
 
-```python
-ENV_KEYS = {
-    "WORKFLOW", "ACQUISITION_DATE",
-    "SOURCE_GRANULE_IDS", "OUTPUT_GRANULE_ID", "ATTEMPT",
-}
+| Parameter               | Example                                                  |
+| ----------------------- | -------------------------------------------------------- |
+| `bejm_job_type`         | `sentinel`                                               |
+| `bejm_partition_fields` | `{"acquisition_date": "2024-01-15"}`                     |
+| `bejm_input_entity_ids` | `["S2A_MSIL1C_20240115T...", "S2A_MSIL1C_20240115T..."]` |
+| `bejm_output_entity_id` | `HLS.S30.T10SEG.2024015T...`                             |
+| `bejm_attempt`          | `1`                                                      |
 
-def get_granule_event(job_detail: dict) -> GranuleProcessingEvent:
-    """Reconstruct processing event from Batch job container environment."""
-    env = {
-        entry["name"]: entry["value"]
-        for entry in job_detail["container"]["environment"]
-        if entry["name"] in ENV_KEYS
-    }
-    return GranuleProcessingEvent(
-        workflow=env["WORKFLOW"],
-        acquisition_date=env["ACQUISITION_DATE"],
-        source_granule_ids=env["SOURCE_GRANULE_IDS"].split(","),
-        output_granule_id=env["OUTPUT_GRANULE_ID"],
-        attempt=int(env["ATTEMPT"]),
-    )
+The container receives the same identity as environment variables (`WORKFLOW`, `ACQUISITION_DATE`,
+`SOURCE_GRANULE_IDS`, `OUTPUT_GRANULE_ID`, `ATTEMPT`) alongside `OUTPUT_BUCKET`.
 
-
-# S3 key constructors — no scanning, all derived from the event
-def canonical_record_key(event: GranuleProcessingEvent, source_granule_id: str) -> str:
-    return f"records/{event.workflow}/{event.acquisition_date}/{source_granule_id}/{event.attempt:03d}.json"
-
-def state_pointer_key(event: GranuleProcessingEvent, source_granule_id: str, state: ProcessingState) -> str:
-    return f"state/{state.name}/{event.workflow}/{event.acquisition_date}/{source_granule_id}/{event.attempt:03d}"
-
-def output_index_key(event: GranuleProcessingEvent, state: ProcessingState) -> str:
-    return f"outputs/{state.name}/{event.workflow}/{event.acquisition_date}/{event.output_granule_id}"
-```
+The existing system's jobs carry no `bejm_*` parameters. The monitor identifies them from their container environment
+instead, and infers their attempt from the source granules' canonical records (see Implementation Sequencing).
 
 ---
 
@@ -367,41 +391,51 @@ def output_index_key(event: GranuleProcessingEvent, state: ProcessingState) -> s
 
 ### Lambda: granule-init
 
-**Prototype**: `src/granule_entry/handler.py` in `hls-nextgen-orchestration` (Sentinel-2 only)  
+**Module**: `src/granule_init/handler.py` (Sentinel-2 only)  
 **Trigger**: S3 event on input granule bucket (SNS -> SQS)  
 **Action**:
 
 - Parse source granule ID from S3 object key; derive output granule ID and acquisition date
-- Check ancillary data availability (S3 HEAD on dated aux prefix)
-- If ancillary present: submit Batch job immediately, write `SUBMITTED` state pointer and canonical record
-- If ancillary missing: write `AWAITING` state pointer and canonical record only
+- Detect a twin granule (S3 LIST on the shared SAFE ID prefix)
+- Check ancillary data availability (S3 LIST on dated aux prefix)
+- If ancillary present and the queue is below `MAX_ACTIVE_JOBS`: claim and submit the Batch job
+- Otherwise: write an `AWAITING_ANCILLARY` state pointer for each source granule
 
-**Landsat `landsat-ac` path**: `granule-init` also handles WRS-2 scene arrivals — same ancillary check, same
-`AWAITING`/`SUBMITTED` state machine, same Batch job submission. Key difference: `output_granule_id` for `landsat-ac` is
-the atmospherically corrected WRS-2 tile (an intermediate product), not the final HLS MGRS tile. The HLS tile is
-produced by `landsat-tile` after mosaicking; see Lambda: landsat-tile-trigger below.
+**Landsat `landsat-ac` path**: `granule-init` also handles WRS-2 scene arrivals -- same ancillary check, same
+`AWAITING_ANCILLARY`/`SUBMITTED` submitter states, same Batch job submission. Key difference: `output_granule_id` for
+`landsat-ac` is the atmospherically corrected WRS-2 tile (an intermediate product), not the final HLS MGRS tile. The HLS
+tile is produced by `landsat-tile` after mosaicking; see Lambda: landsat-tile-trigger below.
 
 ### Lambda: ancillary-trigger
 
-**Prototype**: not yet built — the primary new component  
-**Trigger**: S3 PutObject event on ancillary data dated prefix  
+**Module**: `src/ancillary_trigger/handler.py`  
+**Trigger**: S3 PutObject event on ancillary data dated prefix (SNS -> SQS)  
 **Action**:
 
-- `LIST state/AWAITING/{workflow}/{dated_prefix}/` (bounded scan, ~20k max per date)
-- For each `AWAITING` granule, verify all required ancillary files present for that date
-- Submit AWS Batch job for each ready granule
-- Write `state/SUBMITTED/...` pointer (conditional `if-none-match`)
-- Delete `state/AWAITING/...` pointer
-- Append `SUBMITTED` event to canonical record
+- `LIST state/state=AWAITING_ANCILLARY/job_type=sentinel/acquisition_date={date}/` (bounded scan, ~20k max per date)
+- Group the pointers by output granule, so a twin granule stays one job
+- Enqueue one message per output granule to the ancillary-submit queue
 
-**Concurrency**: Reserved concurrent executions = 1 — prevents parallel scans on the same dated prefix from racing.
+Fan-out is cheap (LIST + SQS batch sends), so a busy date never risks the Lambda timeout.
+
+### Lambda: ancillary-submit
+
+**Module**: `src/ancillary_submit/handler.py`  
+**Trigger**: the internal ancillary-submit SQS queue (with its own DLQ)  
+**Action**:
+
+- Verify the ancillary data for the granule's date is present
+- Claim each source granule (`SUBMITTED`), submit the Batch job, delete the `AWAITING_ANCILLARY` pointers (see
+  Concurrency / Race Conditions)
+
+**Concurrency**: no reserved concurrency is needed; parallel invocations for the same granule are resolved by the claim.
 
 ### Landsat Two-Phase Workflow
 
 Landsat processing is a map-reduce across two Batch job types:
 
 1. **`landsat-ac`** — atmospheric correction per WRS-2 scene. One Batch job per scene. Follows the same
-   `AWAITING -> SUBMITTED -> terminal` state machine as Sentinel-2; `granule-init` handles WRS-2 scene arrivals.
+   submitter states and state machine as Sentinel-2; `granule-init` handles WRS-2 scene arrivals.
 
 2. **`landsat-tile`** — mosaicking one or more `landsat-ac` outputs into a single HLS MGRS tile. The unit of work is
    **(MGRS tile, Landsat orbital path, acquisition date)**, not just (MGRS tile, date). A single MGRS tile can overlap
@@ -418,9 +452,9 @@ The lookup file is bundled with the Lambda (loaded at init time); same pattern s
 At `granule-init` time for a WRS-2 scene (`path`, `row`, `date`):
 
 - Look up overlapping MGRS tiles from the lookup table
-- Write one `AWAITING` canonical record + state pointer for the `landsat-ac` job
-- Write one `AWAITING` canonical record + state pointer for each `(MGRS, path, date)` tiling unit, using a conditional
-  write (`if-none-match`) so the first arriving row from a path creates the record idempotently
+- Write a submitter-state pointer (e.g. `AWAITING_ANCILLARY`) for the `landsat-ac` job
+- Write a submitter-state pointer (e.g. `AWAITING_SCENES`) for each `(MGRS, path, date)` tiling unit, using a
+  conditional write (`if-none-match`) so the first arriving row from a path creates the pointer idempotently
 
 The `landsat-tile` job is submitted when:
 
@@ -430,21 +464,20 @@ The `landsat-tile` job is submitted when:
   `landsat-tile` has been submitted yet -> submit with `PATHROW_LIST` = only the rows that actually completed (partial
   composite — matches current `LandsatMGRSPartialsStepFunction` behavior)
 
-**State key partitioning for multi-phase Landsat**: the `{satellite}` partition in state and record keys becomes
-`{workflow}` to distinguish the two phases. `landsat-tile` keys include `{path}` since the tiling unit is
-`(MGRS, path, date)`:
+**State key partitioning for multi-phase Landsat**: each phase is its own `job_type`. A `landsat-tile` job's tiling unit
+is `(MGRS, path, date)`, so its entity ID combines the MGRS tile and path:
 
 ```
-state/{state}/landsat-ac/{date}/{wrs2_scene_id}/{attempt}         ← per WRS-2 AC
-state/{state}/landsat-tile/{date}/{mgrs_tile_id}/{path}/{attempt} ← per MGRS+path mosaic
-records/landsat-ac/{date}/{wrs2_scene_id}/{attempt}.json
-records/landsat-tile/{date}/{mgrs_tile_id}/{path}/{attempt}.json
+state/state={state}/job_type=landsat-ac/acquisition_date={date}/input_entity_id={wrs2_scene_id}/{attempt}            <- per WRS-2 AC
+state/state={state}/job_type=landsat-tile/acquisition_date={date}/input_entity_id={mgrs_tile_id}_{path}/{attempt}    <- per MGRS+path mosaic
+records/job_type=landsat-ac/acquisition_date={date}/input_entity_id={wrs2_scene_id}/{attempt}.json
+records/job_type=landsat-tile/acquisition_date={date}/input_entity_id={mgrs_tile_id}_{path}/{attempt}.json
 ```
 
-Sentinel-2 uses `sentinel` as the `{workflow}` value (unchanged):
+Sentinel-2 uses `sentinel` as its `job_type`:
 
 ```
-state/{state}/sentinel/{date}/{source_granule_id}/{attempt}
+state/state={state}/job_type=sentinel/acquisition_date={date}/input_entity_id={source_granule_id}/{attempt}
 ```
 
 ### Lambda: landsat-tile-trigger
@@ -455,25 +488,27 @@ state/{state}/sentinel/{date}/{source_granule_id}/{attempt}
 1. **Event** — SQS message from `job-monitor` after each `landsat-ac` `SUCCESS`. Message encodes the MGRS tile(s) and
    orbital path for the completed WRS-2 scene (derived from lookup table at `job-monitor` time or by
    `landsat-tile-trigger` itself).
-2. **Schedule** — EventBridge Scheduler rule (e.g., every 4–8 hours) sweeps `state/AWAITING/landsat-tile/{date}/` for
-   records whose oldest `landsat-ac` SUCCESS is >4 days ago.
+2. **Schedule** -- EventBridge Scheduler rule (e.g., every 4-8 hours) sweeps the `landsat-tile` `AWAITING_SCENES`
+   pointers for each date, for tiling units whose oldest `landsat-ac` SUCCESS is >4 days ago.
 
 **Action per (MGRS tile, orbital path, acquisition date)**:
 
 - If a `SUBMITTED` or terminal state pointer already exists for this `(MGRS, path, date)`: skip — idempotent
 - Look up all rows for `(MGRS, path)` from the lookup table
-- `LIST state/SUCCESS/landsat-ac/{date}/` (or query canonical records) to find which rows have completed
+- `LIST state/state=SUCCESS/job_type=landsat-ac/acquisition_date={date}/` (or query canonical records) to find which
+  rows have completed
 - **Normal path**: if all lookup-table rows have `SUCCESS` -> submit `landsat-tile` with `PATHROW_LIST` = all rows
 - **Timeout path**: if oldest row success timestamp >4 days and at least one row complete -> submit `landsat-tile` with
   `PATHROW_LIST` = completed rows only (partial mosaic)
-- On submission: write `SUBMITTED` state pointer, delete `AWAITING` pointer, embed `(MGRS, path, all completed row IDs)`
-  in Batch env vars
+- On submission: claim (`SUBMITTED`), submit, delete the `AWAITING_SCENES` pointer; embed `(MGRS, path, all completed
+  row IDs)` in Batch env vars
 - If neither condition met: no-op
 
-**`landsat-tile` canonical record key**: `records/landsat-tile/{date}/{mgrs_tile_id}/{path}/{attempt}.json`
+**`landsat-tile` canonical record key**:
+`records/job_type=landsat-tile/acquisition_date={date}/input_entity_id={mgrs_tile_id}_{path}/{attempt}.json`
 
-- `source_granule_ids` = list of contributing WRS-2 scene IDs embedded in Batch env vars.
-- `output_granule_id` = HLS MGRS tile ID (written via sidecar, same as Sentinel-2).
+- The contributing WRS-2 scene IDs are embedded in Batch env vars.
+- `output_entity_id` = HLS MGRS tile ID, known at submission (same as Sentinel-2).
 
 > [!NOTE]
 >
@@ -482,43 +517,60 @@ state/{state}/sentinel/{date}/{source_granule_id}/{attempt}
 
 ### Lambda: job-monitor
 
-**Prototype**: `src/job_monitor/handler.py` in `hls-nextgen-orchestration`  
-**Trigger**: EventBridge rule — `aws.batch` source, `Batch Job State Change`, status IN [SUCCEEDED, FAILED]  
+**Module**: `src/job_monitor/handler.py` -- BEJM's monitor handler, built by BEJM's `JobMonitorFunction`  
+**Trigger**: one EventBridge rule per job type -- `aws.batch` source, `Batch Job State Change`, scoped to the job type's
+queue and job definition. `sentinel` tracks every status Batch sends (`PENDING`, `RUNNABLE`, `STARTING`, `RUNNING`,
+`SUCCEEDED`, `FAILED`); the `phase0-*` types track only `SUCCEEDED` and `FAILED`.  
 **Action**:
 
-- Reconstruct granule key from Batch job environment variables
-- Determine outcome from exit code:
+- Reconstruct the job's identity from its `bejm_*` parameters (or, for the existing system's jobs, from its container
+  environment)
+- Classify the status:
+  - `PENDING` / `RUNNABLE` / `STARTING` / `RUNNING` -> `AWAITING`
   - Exit 0 -> `SUCCESS`
-  - Exit code = `SKIP_CLOUD` -> `CLOUDY`
-  - Exit code = `SKIP_SUN` -> `LOW_SUN_ANGLE`
+  - Exit 4 -> `CLOUDY`
+  - Exit 3 -> `LOW_SUN_ANGLE`
   - No exit code + `statusReason` starts with `"Host EC2"` -> `FAILURE_RETRYABLE` (Spot interruption)
-  - Any other non-zero exit -> `FAILURE_NONRETRYABLE`
-- Append outcome event to canonical record
-- Write new state pointer, delete old state pointer
-- Route: `FAILURE_RETRYABLE` on final Batch attempt -> SQS retry queue; `FAILURE_NONRETRYABLE` -> SQS DLQ
+  - Any other failure -> `FAILURE_NONRETRYABLE`
+- Append the event to each source granule's canonical record, at the EventBridge event's time
+- Write the new state pointer, delete the old one and any submitter-state pointers for the attempt
+- At terminal state, write the output index entry
+- Route: `FAILURE_RETRYABLE` with attempts remaining -> retry queue; terminal failures other than `CLOUDY` /
+  `LOW_SUN_ANGLE` -> failure DLQ. The existing system's jobs are never routed.
 
-**Extension from prototype**: add `CLOUDY` and `LOW_SUN_ANGLE` exit code handling (currently collapsed into
-`FAILURE_NONRETRYABLE`). Write output index entry for all terminal states (not only `SUCCESS`) using `OUTPUT_GRANULE_ID`
-from Batch env vars — no sidecar read needed. For `landsat-ac` `SUCCESS`, also enqueue a readiness check message to
-`landsat-tile-trigger` (encodes the MGRS tile(s) for the completed WRS-2 scene).
+A job on a monitored queue that carries no `bejm_*` parameters (e.g. a manual submission) is counted in an
+`UntrackedJobs` metric and kept in the untracked queue for replay.
 
-### Lambda: job-requeuer
+**Still to build**: for `landsat-ac` `SUCCESS`, enqueue a readiness check message to `landsat-tile-trigger` (encodes the
+MGRS tile(s) for the completed WRS-2 scene).
 
-**Prototype**: `src/job_requeuer/handler.py` in `hls-nextgen-orchestration`  
+### Lambda: job-resubmit
+
+**Module**: `src/job_resubmit/handler.py`, built by BEJM's `JobResubmitFunction`  
 **Trigger**: SQS retry queue (batch size 100, 1-min window)  
 **Action**:
 
-- Parse granule event from SQS message
-- Increment attempt counter
-- Write new `state/AWAITING/.../{attempt+1}` pointer
-- Append `AWAITING` event to canonical record (marking retry)
-- Resubmit to AWS Batch
+- Parse the job group from the retry message
+- Resubmit it to AWS Batch as the next attempt, with the same container environment as the original submission
+
+The monitor records the new attempt from its first Batch event.
 
 ### SQS Queues
 
-- **retry-queue**: `FAILURE_RETRYABLE` outcomes after Batch exhausts internal retries. Visibility timeout = 1 min.
-- **failure-dlq**: `FAILURE_NONRETRYABLE` outcomes. Manual operator review; redriven via Athena query or DLQ console
-  after deploying a fix.
+Created by BEJM's `MonitoringQueues`:
+
+- **retry queue**: `FAILURE_RETRYABLE` outcomes with attempts remaining, drained by `job-resubmit`; has its own DLQ for
+  messages it cannot resubmit.
+- **failure DLQ**: terminal failures. Manual operator review; redriven via Athena query or DLQ console after deploying a
+  fix.
+- **untracked queue**: raw events of jobs that ran on a monitored queue without the `bejm_*` parameters.
+- **event DLQ**: EventBridge events the monitor Lambda failed to process.
+
+And by this stack, each with its own DLQ:
+
+- **granule-init queue**: S3 arrival events from the input bucket.
+- **ancillary-trigger queue**: S3 arrival events for ancillary data.
+- **ancillary-submit queue**: one message per output granule ready to submit.
 
 ### AWS Batch Configuration
 
@@ -537,35 +589,34 @@ Two-tier approach: S3 Inventory key parsing for routine operations, JSON record 
 
 **Primary: S3 Inventory -> Parquet (key parsing only, no JSON reads)**
 
-Daily S3 Inventory on `state/` and `outputs/` prefixes exported as Parquet. All operationally useful information is
-encoded in the key path and extractable via regex — no file content reads needed:
+Daily S3 Inventory on the `state/` and `outputs/` prefixes exported as Parquet. All operationally useful information is
+encoded in the key path and parsed by the Athena views -- no file content reads needed:
 
 ```
-state/{STATE}/{workflow}/{date}/{granule_id}/{attempt}
-outputs/{workflow}/{date}/{output_granule_id}
+state/state={STATE}/job_type={job_type}/acquisition_date={date}/input_entity_id={source_granule_id}/{attempt}
+outputs/state={STATE}/job_type={job_type}/acquisition_date={date}/{output_granule_id}
 ```
+
+Tables (BEJM's `AthenaStateTable` and `AthenaOutputsTable`): `state_inventory` with the `current_granule_states` view,
+and `outputs_inventory` with the `current_outputs` view.
 
 Covers the vast majority of analytics questions:
 
 - Granule counts by state, workflow, date
 - CLOUDY / LOW_SUN_ANGLE / FAILURE rates over time
-- Pending retries (`AWAITING`, `SUBMITTED` counts)
+- Granules waiting on ancillary data or in Batch (`AWAITING_ANCILLARY`, `AWAITING` counts)
 - Successful output coverage by date (from `outputs/` inventory)
 - Reconciliation: compare `outputs/` keys against LP DAAC catalog; compare `state/` keys against CMR
 
 This pattern was validated in `hls-vi-historical-orchestration` — S3 Inventory Parquet + key parsing gave fast, cheap
 progress reporting without any JSON reads.
 
-**Secondary: Athena tables over `records/` JSON (deep dives)**
+**Secondary: Athena table over `records/` JSON (deep dives)**
 
-Three explicitly-defined tables — one per workflow prefix, schemas hand-written (no Glue crawler):
-
-- `records_sentinel` -> `s3://BUCKET/records/sentinel/`
-- `records_landsat_ac` -> `s3://BUCKET/records/landsat-ac/`
-- `records_landsat_tile` -> `s3://BUCKET/records/landsat-tile/`
-
-All three use **partition projection** over `date` — no `MSCK REPAIR TABLE`, no Glue catalog partition registration, new
-partitions are queryable immediately as records land.
+One table (BEJM's `AthenaRecordsTable`), `records`, covers every job type. It uses **partition projection** over
+`job_type` (an enum of the configured job types) and `acquisition_date` -- no `MSCK REPAIR TABLE`, no Glue catalog
+partition registration, new partitions are queryable immediately as records land. The `granule_twin_status` view joins
+it on `batch_job_id` to flag the records of twin-granule jobs.
 
 Use for:
 
@@ -575,7 +626,7 @@ Use for:
 - duration analysis
 - reprocessing gap queries ("what was processed before algorithm version X?")
 
-The typical workflow is to identify the target `(workflow, date, granule_id)` from a `state/` inventory query first,
+The typical workflow is to identify the target `(job_type, date, granule_id)` from a `state/` inventory query first,
 then issue a fully partition-pruned `records/` read against that specific key — minimizing the number of JSON files
 scanned to exactly the ones needed.
 
@@ -597,9 +648,8 @@ never-ancillary granules have a record. `outputs/` covers downstream because it 
 
 ## Design Patterns Carried Forward
 
-HLS NextGen has significantly larger requirements than `hls-vi-historical-orchestration` or the
-`hls-nextgen-orchestration` prototype, so direct code reuse is unlikely to be high-value. The design patterns, however,
-are well-validated and should be carried forward:
+The patterns validated by `hls-vi-historical-orchestration` and the `hls-nextgen-orchestration` prototype are carried
+forward, most of them as code in BEJM:
 
 | Pattern                                                   | Source                            | Notes                                         |
 | --------------------------------------------------------- | --------------------------------- | --------------------------------------------- |
@@ -608,14 +658,14 @@ are well-validated and should be carried forward:
 | SQS dual-queue (retry + DLQ)                              | both prototypes                   | Clean separation of retryable vs bug failures |
 | Reserved Lambda concurrency for single-writer             | `hls-vi-historical-orchestration` | Apply to `ancillary-trigger`                  |
 | Spot interruption detection (no exit code + statusReason) | both prototypes                   | Carry forward exactly                         |
-| Batch envvars for key recovery                            | `hls-nextgen-orchestration`       | All keying info in container env              |
+| Batch job parameters for key recovery                     | `hls-nextgen-orchestration`       | `bejm_*` parameters on every job              |
 | `source_granule_id` + `output_granule_id` data model      | `hls-nextgen-orchestration`       | Both IDs needed for traceability              |
-| `AWAITING` / `SUBMITTED` / terminal state machine         | `hls-nextgen-orchestration`       | Extend with `CLOUDY`, `LOW_SUN_ANGLE`         |
+| Submitter states + Batch-driven state machine             | `hls-nextgen-orchestration`       | With `CLOUDY`, `LOW_SUN_ANGLE` outcomes       |
 | Parquet inventory + Athena for progress reporting         | `hls-vi-historical-orchestration` | Reuse query patterns, not code                |
 
-Key architectural shift from both prototypes: `hls-vi` was inventory-driven (static Parquet list -> queue feeder
-Lambda). `hls-nextgen-orchestration` is event-driven on granule arrival but has no mechanism for re-scanning `AWAITING`
-granules when ancillary data arrives. This design closes that gap with the `ancillary-trigger` Lambda.
+Key architectural shift from `hls-vi`, which was inventory-driven (static Parquet list -> queue feeder Lambda): this
+design is event-driven on granule arrival, and re-scans the granules waiting on ancillary data when it arrives with the
+`ancillary-trigger` Lambda.
 
 ---
 
@@ -658,13 +708,13 @@ in Phase 2 (where each source granule becomes its own Batch job).
 ### Ancillary Data Dependency
 
 **Granule arrives before ancillary (the normal case, 12–36 hour wait):**  
-`granule-init` writes `AWAITING` state. When ancillary data lands, `ancillary-trigger` scans
-`state/AWAITING/{workflow}/{dated_prefix}/` and submits ready granules. The prototype already handles this path.
+`granule-init` writes `AWAITING_ANCILLARY`. When ancillary data lands, `ancillary-trigger` lists the
+`AWAITING_ANCILLARY` pointers for that date and `ancillary-submit` submits the ready granules.
 
 **Ancillary arrives before granule:**  
-`ancillary-trigger` scans the `AWAITING` prefix for that date — finds nothing, exits. When the granule arrives later,
-`granule-init` checks ancillary readiness at arrival time and submits immediately if present (already implemented in the
-prototype's `check_aux_data()` pattern). No periodic re-scan needed; the check-on-arrival path covers this case.
+`ancillary-trigger` lists the `AWAITING_ANCILLARY` pointers for that date -- finds nothing, exits. When the granule
+arrives later, `granule-init` checks ancillary readiness at arrival time and submits immediately if present. No periodic
+re-scan needed; the check-on-arrival path covers this case.
 
 ### Twin Granule Detection
 
@@ -711,8 +761,8 @@ timeout and partial submission exist.
 1. **Normal**: if `count(SUCCESS rows) == count(lookup-table rows for MGRS+path)` -> full mosaic, all rows
 2. **Timeout**: if `oldest SUCCESS ts > 4 days` and `count(SUCCESS rows) > 0` -> partial mosaic, completed rows only
 
-The pre-created `AWAITING` state pointer for each `(MGRS, path, date)` (written at `granule-init` time) gives the
-scheduled sweep a scannable index: `LIST state/AWAITING/landsat-tile/{date}/` to find all pending tiling units.
+The pre-created `AWAITING_SCENES` state pointer for each `(MGRS, path, date)` (written at `granule-init` time) gives
+the scheduled sweep a scannable index of all pending tiling units for a date.
 
 ### Job Splitting (Post-V1)
 
@@ -740,8 +790,8 @@ HLS jobs are configured with a `attemptDurationSeconds` set to 60 minutes. LaSRC
 Aerosol Optical Thickness, and for some very cloudy granules this estimation never converges or can take a very long
 time to converge. These jobs timeout and we handle them as unexpected failures that we retry.
 
-With this proposed orchestration, timed-out jobs should be detected by job-monitor (no exit code, non-Spot status
-reason) and routed to DLQ for investigation.
+Timed-out jobs are classified by the job monitor as `FAILURE_NONRETRYABLE` (no exit code, non-Spot status reason) and
+routed to the failure DLQ for investigation.
 
 ### Operational Runbook
 
@@ -756,29 +806,32 @@ deploying fix Y").
 
 **Phase 0: Shadow observability (no changes to existing system)**
 
-Deploy `job-monitor` as a read-only shadow observer alongside the existing Step Functions orchestration. Job submission,
-ancillary checking, and retry logic remain entirely in the existing system.
+The job monitor shadows the existing Step Functions orchestration's Batch jobs. Job submission, ancillary checking, and
+retry logic remain entirely in the existing system.
 
-- `job-monitor` Lambda with EventBridge Batch state change trigger (same as final design)
-- Writes canonical record + terminal state pointer for every completed Batch job
-- Reconstructs lifecycle from Batch job detail: `SUBMITTED` event at `job.createdAt`, terminal event at `job.stoppedAt`
-  — `AWAITING` is omitted (no signal available without `granule-init`)
-- Records marked `"shadow": true` to distinguish from full-lifecycle records in Athena queries
-- `output_granule_id`: derivable from existing Batch env vars for all workflows — single-granule Sentinel-2 from
-  `GRANULE` (SAFE ID), twins from `GRANULE` (comma-separated SAFE IDs, same `twin_granule.py` derivation rule),
-  `landsat-tile` from `MGRS` + `DATE`
-- Define Athena/Glue table over `records/` prefix once a handful of records land — one-time table definition, then
-  immediately queryable for exit code distribution, CLOUDY/LOW_SUN_ANGLE separation, Spot interruption rate, and retry
+- One job type per existing job queue and job definition: `phase0-sentinel`, `phase0-landsat-ac`,
+  `phase0-landsat-tile` (set the `PHASE0_*` settings to enable them)
+- Tracks only `SUCCEEDED` and `FAILED`, and never routes failures -- the existing system retries its own jobs
+- The jobs carry no `bejm_*` parameters, so the monitor identifies them from their container environment: Sentinel-2
+  from `GRANULE_LIST` (SAFE IDs, twins comma-separated; `output_granule_id` derived as for Phase 1), `landsat-ac` from
+  `GRANULE`, `landsat-tile` from `MGRS` + `PATHROW_LIST` (dated by the job's creation time)
+- The existing system resubmits each retry as a new Batch job without recording the attempt, so the attempt is inferred
+  from the source granules' canonical records: a Batch job already recorded keeps its attempt, a new one is the next
+- The `phase0-*` job types keep shadow records apart from Phase 1's in every key and Athena query, and their canonical
+  records cover exit code distribution, `CLOUDY`/`LOW_SUN_ANGLE` separation, Spot interruption rate, and retry
   convergence against real production data
-- Monitoring Step Function state changes for `AWAITING` timestamps is explicitly out of scope — the correlation
-  complexity is not worth one timestamp that disappears when `granule-init` is built
+- Monitoring Step Function state changes for the ancillary wait is explicitly out of scope
 
 **Phase 1: Event-driven orchestration (this work)**
 
-- Extend `hls-nextgen-orchestration` prototype: add `CLOUDY`/`LOW_SUN_ANGLE` states, two-object S3 schema
-- Build `ancillary-trigger` Lambda (primary missing piece for Sentinel-2)
-- Resolve twin granule key schema question
-- Athena database over `records/` prefix
+Done for Sentinel-2:
+
+- `CLOUDY`/`LOW_SUN_ANGLE` outcomes, the three-object S3 schema, and the twin granule key schema
+- `ancillary-trigger` / `ancillary-submit` Lambdas
+- Athena tables over `records/`, `state/`, and `outputs/`
+
+Remaining:
+
 - Retire Step Functions polling + RDS log DB
 - Landsat two-phase workflow: extend `granule-init` for WRS-2 arrivals (`landsat-ac` path), build `landsat-tile-trigger`
   (event + schedule modes), resolve WRS-2 completeness definition

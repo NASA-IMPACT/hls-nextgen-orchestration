@@ -6,22 +6,17 @@ from unittest.mock import MagicMock
 
 import pytest
 from aws_lambda_powertools.utilities.typing import LambdaContext
+from batch_event_job_monitor import S3RecordStore
 
-from common import S3RecordStore
+from common.ancillary import check_aux_data
+from common.jobs import AWAITING_ANCILLARY, SUBMITTED, sentinel_job_group
 from granule_init.handler import (
-    check_aux_data,
-    convert_safe_id_to_hls_id,
     detect_twin_safe_ids,
     extract_safe_id_from_s3_key,
-    parse_s3_sns_message,
+    parse_s3_sqs_message,
     process_record,
 )
 from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR, SAFE_ID
-
-
-@pytest.fixture
-def store(bucket: str) -> S3RecordStore:
-    return S3RecordStore(bucket=bucket)
 
 
 @pytest.fixture
@@ -49,23 +44,6 @@ class TestExtractSafeId:
         assert extract_safe_id_from_s3_key(key) == SAFE_ID
 
 
-class TestConvertSafeIdToHlsId:
-    def test_known_conversion(self) -> None:
-        result = convert_safe_id_to_hls_id(SAFE_ID)
-        assert result == GRANULE_ID_STR
-
-    @pytest.mark.parametrize(
-        ["safe_id", "expected_tile"],
-        [
-            ("S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510", "T18TYN"),
-            ("S2B_MSIL1C_20240115T160901_N0509_R097_T10SEG_20240115T180000", "T10SEG"),
-        ],
-    )
-    def test_tile_extraction(self, safe_id: str, expected_tile: str) -> None:
-        hls_id = convert_safe_id_to_hls_id(safe_id)
-        assert f".{expected_tile}." in hls_id
-
-
 class TestParseSnsMessage:
     def test_round_trip(self) -> None:
         s3_event = {
@@ -79,7 +57,7 @@ class TestParseSnsMessage:
             ]
         }
         sns_msg = json.dumps({"Message": json.dumps(s3_event)})
-        records = parse_s3_sns_message(sns_msg)
+        records = parse_s3_sqs_message(sns_msg)
         assert len(records) == 1
         assert records[0]["s3"]["object"]["key"] == f"input/{SAFE_ID}.zip"
 
@@ -147,18 +125,43 @@ def _make_sqs_body(safe_id: str = SAFE_ID, bucket: str = "test-sentinel") -> str
     return json.dumps({"Message": json.dumps(s3_event)})
 
 
+def _pointer_exists(store: S3RecordStore, state: Any) -> bool:
+    import boto3
+
+    [context] = sentinel_job_group(
+        acquisition_date=ACQUISITION_DATE,
+        source_granule_ids=[SAFE_ID],
+        output_granule_id=GRANULE_ID_STR,
+    ).contexts()
+    key = store.state_pointer_key(state, context)
+    s3 = boto3.client("s3", region_name="us-west-2")
+    return bool(s3.list_objects_v2(Bucket=store.bucket, Prefix=key).get("KeyCount"))
+
+
 class TestProcessRecord:
-    def test_writes_awaiting_when_no_aux(
+    @pytest.fixture(autouse=True)
+    def env(
         self,
-        store: S3RecordStore,
         sentinel_bucket: str,
         output_bucket: str,
         batch_queue_name: str,
         monkeypatch: pytest.MonkeyPatch,
-        mocked_batch_client_submit_job: MagicMock,
+    ) -> None:
+        import boto3
+
+        monkeypatch.setenv("SENTINEL_JOB_DEFINITION_NAME", "sentinel-job-def")
+        monkeypatch.setenv("MAX_ACTIVE_JOBS", "10000")
+        boto3.client("s3", region_name="us-west-2").put_object(
+            Bucket=sentinel_bucket, Key=f"input/{SAFE_ID}.zip", Body=b""
+        )
+
+    def test_writes_awaiting_ancillary_when_no_aux(
+        self,
+        store: S3RecordStore,
+        monkeypatch: pytest.MonkeyPatch,
+        mocked_submit_job: MagicMock,
         mocked_active_jobs_below_threshold: MagicMock,
     ) -> None:
-        # Create an empty aux bucket so check_aux_data returns False
         import boto3
 
         empty_aux = "test-aux-empty"
@@ -167,43 +170,49 @@ class TestProcessRecord:
             CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
         )
         monkeypatch.setenv("AUX_DATA_BUCKET_NAME", empty_aux)
-        monkeypatch.setenv("SENTINEL_JOB_DEFINITION_NAME", "sentinel-job-def")
-        monkeypatch.setenv("MAX_ACTIVE_JOBS", "10000")
-
-        import boto3
-
-        s3 = boto3.client("s3", region_name="us-west-2")
-        s3.put_object(Bucket=sentinel_bucket, Key=f"input/{SAFE_ID}.zip", Body=b"")
 
         process_record(_make_sqs_body())
 
-        key = S3RecordStore.canonical_key("sentinel", ACQUISITION_DATE, SAFE_ID, 0)
-        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
-        assert record["current_state"] == "AWAITING"
-        mocked_batch_client_submit_job.assert_not_called()
+        assert _pointer_exists(store, AWAITING_ANCILLARY)
+        mocked_submit_job.assert_not_called()
 
-    def test_writes_submitted_when_aux_available(
+    def test_writes_awaiting_ancillary_when_too_many_jobs_are_active(
         self,
         store: S3RecordStore,
-        sentinel_bucket: str,
         aux_bucket: str,
-        output_bucket: str,
-        batch_queue_name: str,
-        monkeypatch: pytest.MonkeyPatch,
-        mocked_batch_client_submit_job: MagicMock,
+        mocked_submit_job: MagicMock,
         mocked_active_jobs_below_threshold: MagicMock,
     ) -> None:
-        monkeypatch.setenv("SENTINEL_JOB_DEFINITION_NAME", "sentinel-job-def")
-        monkeypatch.setenv("MAX_ACTIVE_JOBS", "10000")
-
-        import boto3
-
-        s3 = boto3.client("s3", region_name="us-west-2")
-        s3.put_object(Bucket=sentinel_bucket, Key=f"input/{SAFE_ID}.zip", Body=b"")
+        mocked_active_jobs_below_threshold.return_value = False
 
         process_record(_make_sqs_body())
 
-        key = S3RecordStore.canonical_key("sentinel", ACQUISITION_DATE, SAFE_ID, 0)
-        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
-        assert record["current_state"] == "SUBMITTED"
-        mocked_batch_client_submit_job.assert_called_once()
+        assert _pointer_exists(store, AWAITING_ANCILLARY)
+        mocked_submit_job.assert_not_called()
+
+    def test_claims_and_submits_when_aux_available(
+        self,
+        store: S3RecordStore,
+        aux_bucket: str,
+        mocked_submit_job: MagicMock,
+        mocked_active_jobs_below_threshold: MagicMock,
+    ) -> None:
+        process_record(_make_sqs_body())
+
+        assert _pointer_exists(store, SUBMITTED)
+        mocked_submit_job.assert_called_once()
+        job_group = mocked_submit_job.call_args.kwargs["job_group"]
+        assert job_group.input_entity_ids == [SAFE_ID]
+        assert job_group.attempt == 1
+
+    def test_a_duplicate_event_is_not_submitted_twice(
+        self,
+        store: S3RecordStore,
+        aux_bucket: str,
+        mocked_submit_job: MagicMock,
+        mocked_active_jobs_below_threshold: MagicMock,
+    ) -> None:
+        process_record(_make_sqs_body())
+        process_record(_make_sqs_body())
+
+        mocked_submit_job.assert_called_once()

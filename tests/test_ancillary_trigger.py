@@ -4,19 +4,15 @@ import json
 
 import boto3
 import pytest
+from batch_event_job_monitor import S3RecordStore
 from mypy_boto3_sqs import SQSClient
 
 from ancillary_trigger.handler import process_aux_event
-from common import ProcessingEventRecord, ProcessingState, S3RecordStore
-from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR, SAFE_ID
+from common.jobs import sentinel_job_group, write_awaiting_ancillary
+from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR, SAFE_ID, TWIN_SAFE_ID
 
 # Matches ACQUISITION_DATE (2023-08-17 = DOY 229)
 _AUX_KEY = "lasrc_aux/LADS/2023/VJ104ANC.A2023229"
-
-
-@pytest.fixture
-def store(bucket: str) -> S3RecordStore:
-    return S3RecordStore(bucket=bucket)
 
 
 @pytest.fixture
@@ -24,70 +20,59 @@ def submit_queue(sqs: SQSClient) -> str:
     return sqs.create_queue(QueueName="test-ancillary-submit")["QueueUrl"]
 
 
-@pytest.fixture
-def awaiting_granule(store: S3RecordStore) -> None:
-    """Pre-populate an AWAITING canonical record and state pointer."""
-    store.append_canonical_event(
-        source_granule_id=SAFE_ID,
-        output_granule_id=GRANULE_ID_STR,
-        workflow="sentinel",
-        acquisition_date=ACQUISITION_DATE,
-        attempt=0,
-        event=ProcessingEventRecord(state="AWAITING", ts="2023-08-17T00:00:00Z"),
-        shadow=False,
-    )
-    store.write_state_pointer(
-        workflow="sentinel",
-        acquisition_date=ACQUISITION_DATE,
-        source_granule_id=SAFE_ID,
-        attempt=0,
-        new_state=ProcessingState.AWAITING,
-        old_state=None,
-        output_granule_id=GRANULE_ID_STR,
+def _await(store: S3RecordStore, source_granule_ids: list[str]) -> None:
+    write_awaiting_ancillary(
+        store,
+        sentinel_job_group(
+            acquisition_date=ACQUISITION_DATE,
+            source_granule_ids=source_granule_ids,
+            output_granule_id=GRANULE_ID_STR,
+        ),
     )
 
 
-def _run(store: S3RecordStore, submit_queue_url: str, s3_key: str = _AUX_KEY) -> int:
-    return process_aux_event(
-        s3_key=s3_key,
-        processing_bucket=store.bucket,
-        submit_queue_url=submit_queue_url,
-    )
+def _messages(submit_queue: str) -> list[dict]:
+    sqs = boto3.client("sqs", region_name="us-west-2")
+    resp = sqs.receive_message(QueueUrl=submit_queue, MaxNumberOfMessages=10)
+    return [json.loads(m["Body"]) for m in resp.get("Messages", [])]
 
 
 class TestProcessAuxEvent:
     def test_unrecognised_key_is_noop(
-        self,
-        store: S3RecordStore,
-        submit_queue: str,
+        self, store: S3RecordStore, submit_queue: str
     ) -> None:
-        result = _run(store, submit_queue, s3_key="some/other/file.tif")
+        result = process_aux_event(
+            s3_key="some/other/file.tif", submit_queue_url=submit_queue
+        )
         assert result == 0
 
     def test_no_awaiting_granules_is_noop(
-        self,
-        store: S3RecordStore,
-        submit_queue: str,
+        self, store: S3RecordStore, submit_queue: str
     ) -> None:
-        result = _run(store, submit_queue)
-        assert result == 0
+        assert process_aux_event(s3_key=_AUX_KEY, submit_queue_url=submit_queue) == 0
 
     def test_single_awaiting_granule_enqueued(
-        self,
-        store: S3RecordStore,
-        submit_queue: str,
-        awaiting_granule: None,
+        self, store: S3RecordStore, submit_queue: str
     ) -> None:
-        result = _run(store, submit_queue)
-        assert result == 1
+        _await(store, [SAFE_ID])
 
-        sqs = boto3.client("sqs", region_name="us-west-2")
-        resp = sqs.receive_message(QueueUrl=submit_queue, MaxNumberOfMessages=10)
-        messages = resp.get("Messages", [])
-        assert len(messages) == 1
+        assert process_aux_event(s3_key=_AUX_KEY, submit_queue_url=submit_queue) == 1
 
-        body = json.loads(messages[0]["Body"])
-        assert body["source_granule_id"] == SAFE_ID
-        assert body["output_granule_id"] == GRANULE_ID_STR
-        assert body["attempt"] == 0
-        assert body["acquisition_date"] == ACQUISITION_DATE
+        assert _messages(submit_queue) == [
+            {
+                "acquisition_date": ACQUISITION_DATE,
+                "source_granule_ids": [SAFE_ID],
+                "output_granule_id": GRANULE_ID_STR,
+                "attempt": 1,
+            }
+        ]
+
+    def test_twin_granules_are_one_message(
+        self, store: S3RecordStore, submit_queue: str
+    ) -> None:
+        _await(store, [SAFE_ID, TWIN_SAFE_ID])
+
+        assert process_aux_event(s3_key=_AUX_KEY, submit_queue_url=submit_queue) == 1
+
+        [message] = _messages(submit_queue)
+        assert message["source_granule_ids"] == [SAFE_ID, TWIN_SAFE_ID]

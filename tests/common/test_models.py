@@ -1,37 +1,7 @@
 import pytest
 
-from common.models import (
-    EXIT_CODE_CLOUDY,
-    EXIT_CODE_LOW_SUN_ANGLE,
-    GranuleId,
-    GranuleProcessingEvent,
-    ProcessingState,
-)
-
-
-class TestProcessingState:
-    def test_all_states_present(self) -> None:
-        names = {s.name for s in ProcessingState}
-        assert "CLOUDY" in names
-        assert "LOW_SUN_ANGLE" in names
-        assert "SUCCESS" in names
-        assert "AWAITING" in names
-        assert "SUBMITTED" in names
-        assert "FAILURE_RETRYABLE" in names
-        assert "FAILURE_NONRETRYABLE" in names
-
-    def test_terminal_states(self) -> None:
-        assert ProcessingState.SUCCESS.is_terminal()
-        assert ProcessingState.CLOUDY.is_terminal()
-        assert ProcessingState.LOW_SUN_ANGLE.is_terminal()
-        assert ProcessingState.FAILURE_NONRETRYABLE.is_terminal()
-        assert not ProcessingState.AWAITING.is_terminal()
-        assert not ProcessingState.SUBMITTED.is_terminal()
-        assert not ProcessingState.FAILURE_RETRYABLE.is_terminal()
-
-    def test_exit_code_constants(self) -> None:
-        assert EXIT_CODE_CLOUDY == 4
-        assert EXIT_CODE_LOW_SUN_ANGLE == 3
+from common.models import GranuleId, GranuleProcessingEvent, convert_safe_id_to_hls_id
+from tests.conftest import GRANULE_ID_STR, SAFE_ID
 
 
 class TestGranuleId:
@@ -47,13 +17,28 @@ class TestGranuleId:
         assert str(granule_id_) == granule_id
 
 
+class TestConvertSafeIdToHlsId:
+    def test_known_conversion(self) -> None:
+        assert convert_safe_id_to_hls_id(SAFE_ID) == GRANULE_ID_STR
+
+    @pytest.mark.parametrize(
+        ["safe_id", "expected_tile"],
+        [
+            ("S2A_MSIL1C_20230817T154921_N0509_R011_T18TYN_20230817T204510", "T18TYN"),
+            ("S2B_MSIL1C_20240115T160901_N0509_R097_T10SEG_20240115T180000", "T10SEG"),
+        ],
+    )
+    def test_tile_extraction(self, safe_id: str, expected_tile: str) -> None:
+        assert f".{expected_tile}." in convert_safe_id_to_hls_id(safe_id)
+
+
 class TestGranuleProcessingEvent:
     @pytest.mark.parametrize("debug_bucket", ["my-debug-bucket", None])
-    def test_to_from_envvar(self, debug_bucket: str | None) -> None:
+    def test_to_envvar(self, debug_bucket: str | None) -> None:
         event = GranuleProcessingEvent(
             workflow="sentinel",
             acquisition_date="2024-01-15",
-            source_granule_ids=["S2A_MSIL1C_20240115T..._T18TYN_20240115T..."],
+            source_granule_ids=["S2A_one", "S2A_two"],
             output_granule_id="HLS.S30.T18TYN.2024015T154921.v2.0",
             attempt=2,
             debug_bucket=debug_bucket,
@@ -61,43 +46,11 @@ class TestGranuleProcessingEvent:
         env = event.to_envvar()
         assert env["WORKFLOW"] == "sentinel"
         assert env["ACQUISITION_DATE"] == "2024-01-15"
-        assert env["ATTEMPT"] == "2"
-
-        recovered = GranuleProcessingEvent.from_envvar(env)
-        assert recovered == event
-
-    def test_source_granule_ids_comma_separated(self) -> None:
-        ids = ["S2A_one", "S2A_two"]
-        event = GranuleProcessingEvent(
-            workflow="sentinel",
-            acquisition_date="2024-01-15",
-            source_granule_ids=ids,
-            output_granule_id="HLS.S30.T18TYN.2024015T154921.v2.0",
-        )
-        env = event.to_envvar()
         assert env["SOURCE_GRANULE_IDS"] == "S2A_one,S2A_two"
-        recovered = GranuleProcessingEvent.from_envvar(env)
-        assert recovered.source_granule_ids == ids
+        assert env["OUTPUT_GRANULE_ID"] == "HLS.S30.T18TYN.2024015T154921.v2.0"
+        assert env["ATTEMPT"] == "2"
+        assert env.get("DEBUG_BUCKET") == debug_bucket
 
-    def test_to_from_json(self) -> None:
-        event = GranuleProcessingEvent(
-            workflow="sentinel",
-            acquisition_date="2024-01-15",
-            source_granule_ids=["S2A_foo"],
-            output_granule_id="HLS.S30.T18TYN.2024015T154921.v2.0",
-            attempt=1,
-        )
-        assert GranuleProcessingEvent.from_json(event.to_json()) == event
-
-    def test_new_attempt(self) -> None:
-        event = GranuleProcessingEvent(
-            workflow="sentinel",
-            acquisition_date="2024-01-15",
-            source_granule_ids=["S2A_foo"],
-            output_granule_id="HLS.S30.T18TYN.2024015T154921.v2.0",
-            attempt=1,
-        )
-        next_event = event.new_attempt()
-        assert next_event.attempt == 2
-        assert next_event.workflow == event.workflow
-        assert next_event.source_granule_ids == event.source_granule_ids
+    def test_to_environment(self) -> None:
+        event = GranuleProcessingEvent(workflow="sentinel", acquisition_date="d")
+        assert {"name": "WORKFLOW", "value": "sentinel"} in event.to_environment()

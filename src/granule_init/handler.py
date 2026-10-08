@@ -21,7 +21,7 @@ from aws_lambda_powertools import Logger, Metrics, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from common import AwsBatchClient, GranuleId, convert_safe_id_to_hls_id
-from common.ancillary import check_aux_data
+from common.ancillary import ancillary_source_from_env
 from common.jobs import (
     claim_and_submit,
     record_store,
@@ -95,7 +95,7 @@ def detect_twin_safe_ids(bucket: str, safe_id: str, s3_client: Any) -> list[str]
 def process_record(sqs_body: str) -> None:
     """Process one SQS message (SNS-wrapped S3 event)."""
     sentinel_bucket = os.environ["SENTINEL_BUCKET_NAME"]
-    aux_bucket = os.environ["AUX_DATA_BUCKET_NAME"]
+    ancillary = ancillary_source_from_env()
     output_bucket = os.environ["OUTPUT_BUCKET_NAME"]
     batch_queue = os.environ["BATCH_QUEUE_NAME"]
     job_definition = os.environ["SENTINEL_JOB_DEFINITION_NAME"]
@@ -121,7 +121,7 @@ def process_record(sqs_body: str) -> None:
             output_granule_id=output_granule_id,
         )
 
-        if not check_aux_data(granule_id, aux_bucket, s3_client):
+        if not ancillary.is_available(granule_id.begin_datetime.date(), s3_client):
             logger.info("Ancillary unavailable; deferring %s", output_granule_id)
             write_awaiting_ancillary(store, job_group)
             continue

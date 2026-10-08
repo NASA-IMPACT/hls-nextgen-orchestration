@@ -23,7 +23,7 @@ from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from common import GranuleId
-from common.ancillary import check_aux_data
+from common.ancillary import AncillarySource, ancillary_source_from_env
 from common.jobs import claim_and_submit, record_store, sentinel_job_group
 
 logger = Logger()
@@ -37,7 +37,7 @@ def process_granule(
     source_granule_ids: list[str],
     output_granule_id: str,
     attempt: int,
-    aux_bucket: str,
+    ancillary: AncillarySource,
     batch_queue: str,
     job_definition: str,
     output_bucket: str,
@@ -52,7 +52,7 @@ def process_granule(
         logger.warning("Cannot parse output_granule_id=%s; skipping", output_granule_id)
         return False
 
-    if not check_aux_data(granule_id, aux_bucket, boto3.client("s3")):
+    if not ancillary.is_available(granule_id.begin_datetime.date(), boto3.client("s3")):
         logger.info("Ancillary not yet available for %s; skipping", output_granule_id)
         return False
 
@@ -83,7 +83,7 @@ def process_granule(
 @tracer.capture_lambda_handler
 def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, int]:
     """Lambda entry point for per-granule ancillary-submit messages."""
-    aux_bucket = os.environ["AUX_DATA_BUCKET_NAME"]
+    ancillary = ancillary_source_from_env()
     batch_queue = os.environ["BATCH_QUEUE_NAME"]
     job_definition = os.environ["SENTINEL_JOB_DEFINITION_NAME"]
     output_bucket = os.environ["OUTPUT_BUCKET_NAME"]
@@ -96,7 +96,7 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, int]:
             source_granule_ids=msg["source_granule_ids"],
             output_granule_id=msg["output_granule_id"],
             attempt=msg["attempt"],
-            aux_bucket=aux_bucket,
+            ancillary=ancillary,
             batch_queue=batch_queue,
             job_definition=job_definition,
             output_bucket=output_bucket,

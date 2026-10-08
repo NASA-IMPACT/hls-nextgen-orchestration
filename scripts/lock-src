@@ -1,0 +1,11 @@
+#!/bin/bash
+# Lock the Lambda dependencies on their own, outside the uv workspace: Lambda
+# bundling installs from src/uv.lock, and `uv lock` inside src/ would lock the
+# whole workspace instead.
+set -euo pipefail
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cp src/pyproject.toml src/uv.lock "$tmp/"
+(cd "$tmp" && uv lock)
+cp "$tmp/uv.lock" src/uv.lock

@@ -85,7 +85,7 @@ class StackSettings(BaseSettings):
     AUX_DATA_BUCKET_NAME: str
     # Where LaSRC's ancillary data comes from (see common.ancillary); the
     # aux data bucket must hold that source's data
-    ANCILLARY_SOURCE: str = "lads"
+    ANCILLARY_SOURCE: str = "laads"
 
     # Output bucket for processed products
     OUTPUT_BUCKET_NAME: str

@@ -40,7 +40,7 @@ from common.jobs import (
     phase0_job_type_config,
     sentinel_job_type_config,
 )
-from hls_constructs import BatchInfra, BatchJob, GranuleTwinView, QueueWithDlq
+from hls_constructs import BatchInfra, BatchJob, QueueWithDlq, create_granule_twin_view
 from settings import StackSettings
 
 LAMBDA_EXCLUDE = [
@@ -156,9 +156,13 @@ class HlsStack(Stack):
             ),
         ]
 
+        # The Athena construct ids keep the logical IDs of the tables they
+        # replaced: the table names are unchanged, and CloudFormation creates a
+        # replacement before deleting the original, so a new logical ID would
+        # collide with the existing table of the same name.
         self.athena_records = AthenaRecordsTable(
             self,
-            "AthenaRecordsTable",
+            "AthenaRecordsDatabase",
             database=self.athena_database,
             database_name=settings.ATHENA_DATABASE_NAME,
             records_bucket_name=settings.PROCESSING_BUCKET_NAME,
@@ -166,9 +170,9 @@ class HlsStack(Stack):
             partition_keys=partition_keys,
             table_name=settings.ATHENA_RECORDS_TABLE_NAME,
         )
-        self.granule_twin_view = GranuleTwinView(
-            self,
-            "GranuleTwinView",
+        self.granule_twin_view = create_granule_twin_view(
+            self.athena_records,
+            "TwinView",
             database=self.athena_database,
             database_name=settings.ATHENA_DATABASE_NAME,
             records_table=self.athena_records.records_table,
@@ -177,7 +181,7 @@ class HlsStack(Stack):
         )
         self.athena_state = AthenaStateTable(
             self,
-            "AthenaStateTable",
+            "AthenaStateDatabase",
             database=self.athena_database,
             database_name=settings.ATHENA_DATABASE_NAME,
             inventory_location_s3path=self.processing.inventory_location(
@@ -190,7 +194,7 @@ class HlsStack(Stack):
         )
         self.athena_outputs = AthenaOutputsTable(
             self,
-            "AthenaOutputsTable",
+            "AthenaOutputsDatabase",
             database=self.athena_database,
             database_name=settings.ATHENA_DATABASE_NAME,
             inventory_location_s3path=self.processing.inventory_location(

@@ -3,10 +3,7 @@ name = "src"
 version = "0.1.0"
 description = "Common modules for lambdas"
 requires-python = ">=3.11"
-dependencies = [
-    "boto_session_manager",
-    "s3pathlib",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [

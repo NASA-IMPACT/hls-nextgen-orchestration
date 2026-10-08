@@ -33,9 +33,7 @@ dev = [
   "pytest-cov>=6.1.1",
   "pytest-lazy-fixtures>=1.1.2",
   "pydantic-settings>=2.8.1",
-  "responses>=0.25.7",
   "ruff>=0.11.4",
-  "types-requests>=2.32.0.20250515",
 ]
 
 [build-system]
@@ -43,7 +41,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/common", "src/job_monitor", "src/job_requeuer"]
+packages = ["src/common", "src/granule_init", "src/ancillary_trigger", "src/job_monitor", "src/job_requeuer"]
 
 [tool.ruff]
 line-length = 88
@@ -51,7 +49,7 @@ target-version = "py311"
 exclude = ["cdk.out", ".venv", "node_modules"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+select = ["E", "F", "I", "UP"]
 per-file-ignores = {}
 
 [tool.ruff.format]
@@ -63,8 +61,12 @@ line-ending = "auto"
 [tool.ruff.lint.isort]
 known-first-party = [
   "common",
+  "granule_init",
+  "ancillary_trigger",
   "job_monitor",
   "job_requeuer",
+  "hls_constructs",
+  "settings",
 ]
 combine-as-imports = true
 
@@ -73,21 +75,14 @@ combine-as-imports = true
 testpaths = [
     "tests",
 ]
+pythonpath = ["."]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 explicit_package_bases = false
 files = ["cdk", "src", "tests"]
-mypy_path = ["cdk", "src"]
+mypy_path = ["cdk", "src", "."]
 plugins = ["pydantic.mypy"]
-
-[[tool.mypy.overrides]]
-module = "s3pathlib"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "boto_session_manager"
-ignore_missing_imports = true

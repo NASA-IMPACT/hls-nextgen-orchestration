@@ -1,158 +1,182 @@
-"""Tests for `job_monitor` Lambda"""
+"""Tests for the job_monitor Lambda."""
+
+import json
 
 import pytest
-from mypy_boto3_batch.type_defs import JobDetailTypeDef
 from mypy_boto3_sqs import SQSClient
 
-from common import GranuleId, ProcessingState
-from common.aws_batch import JobChangeEvent, JobDetails
-from common.granule_logger import GranuleLoggerService
+from common import ProcessingState, S3RecordStore
+from common.aws_batch import JobChangeEvent
 from job_monitor.handler import job_monitor
 
 
 @pytest.fixture
-def job_logger(bucket: str) -> GranuleLoggerService:
-    return GranuleLoggerService(bucket, "logs")
+def store(bucket: str) -> S3RecordStore:
+    return S3RecordStore(bucket=bucket)
 
 
-def test_handler_logs_nonretryable_failure(
-    granule_id: GranuleId,
-    source_granule_id: str,
-    job_logger: GranuleLoggerService,
-    sqs: SQSClient,
-    retry_queue: str,
-    failure_dlq: str,
-    event_job_detail_change_failed: JobChangeEvent,
+def _run(
+    event: JobChangeEvent, bucket: str, retry_queue: str, failure_dlq: str
 ) -> None:
-    """Test the handler"""
-    event = event_job_detail_change_failed.copy()
-    event["detail"]["container"]["exitCode"] = 1
-    assert (
-        JobDetails(event["detail"]).get_job_state()
-        == ProcessingState.FAILURE_NONRETRYABLE
-    )
-
     job_monitor(
         job_change_event=event,
-        logs_bucket=job_logger.bucket,
-        logs_prefix=job_logger.logs_prefix,
+        logs_bucket=bucket,
         retry_queue_url=retry_queue,
         failure_dlq_url=failure_dlq,
     )
 
-    messages = sqs.receive_message(QueueUrl=failure_dlq)["Messages"]
-    assert len(messages) == 1
 
-    events = job_logger.list_events(
-        granule_id=granule_id,
-        source_granule_id=source_granule_id,
-    )
-    assert len(events[ProcessingState.FAILURE_NONRETRYABLE]) == 1
-    assert events[ProcessingState.FAILURE_NONRETRYABLE][0].attempt == 0
-    assert ProcessingState.SUCCESS not in events
+# ---------------------------------------------------------------------------
+# Phase 1 (new orchestration, WORKFLOW env var present)
+# ---------------------------------------------------------------------------
 
 
-def test_handler_retryable_failure_last_attempt(
-    granule_id: GranuleId,
-    source_granule_id: str,
-    job_logger: GranuleLoggerService,
-    sqs: SQSClient,
-    retry_queue: str,
-    failure_dlq: str,
-    event_job_detail_change_failed: JobChangeEvent,
-    job_detail_failed_spot: JobDetailTypeDef,
-) -> None:
-    """Test behavior for Spot failure on last AWS Batch attempt
+class TestPhase1:
+    def test_success_writes_canonical_and_pointer(
+        self,
+        event_job_success: JobChangeEvent,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue: str,
+        failure_dlq: str,
+    ) -> None:
+        _run(event_job_success, store.bucket, retry_queue, failure_dlq)
 
-    The handler should log the attempt AND requeue it since AWS Batch won't
-    retry it internally.
-    """
-    event = event_job_detail_change_failed.copy()
-    event["detail"] = job_detail_failed_spot
-    event["detail"]["attempts"] = [event["detail"]["attempts"][0]] * 3
+        from tests.conftest import ACQUISITION_DATE, SAFE_ID
 
-    job_monitor(
-        job_change_event=event,
-        logs_bucket=job_logger.bucket,
-        logs_prefix=job_logger.logs_prefix,
-        retry_queue_url=retry_queue,
-        failure_dlq_url=failure_dlq,
-    )
+        key = S3RecordStore.canonical_key("sentinel", ACQUISITION_DATE, SAFE_ID, 0)
+        s3 = __import__("boto3").client("s3", region_name="us-west-2")
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        assert record["current_state"] == "SUCCESS"
+        assert len(record["events"]) == 1
+        assert record["shadow"] is False
 
-    messages = sqs.receive_message(QueueUrl=retry_queue)["Messages"]
-    assert len(messages) == 1
+    def test_success_writes_output_index(
+        self,
+        event_job_success: JobChangeEvent,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue: str,
+        failure_dlq: str,
+    ) -> None:
+        _run(event_job_success, store.bucket, retry_queue, failure_dlq)
 
-    events = job_logger.list_events(
-        granule_id=str(granule_id),
-        source_granule_id=source_granule_id,
-    )
-    assert len(events[ProcessingState.FAILURE_RETRYABLE]) == 1
-    assert events[ProcessingState.FAILURE_RETRYABLE][0].attempt == 0
-    assert ProcessingState.SUCCESS not in events
+        from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR
+
+        key = S3RecordStore.output_index_key(
+            ProcessingState.SUCCESS, "sentinel", ACQUISITION_DATE, GRANULE_ID_STR
+        )
+        s3 = __import__("boto3").client("s3", region_name="us-west-2")
+        resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=key)
+        assert resp.get("KeyCount", 0) == 1
+
+    def test_cloudy_writes_terminal_and_output_index(
+        self,
+        event_job_cloudy: JobChangeEvent,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue: str,
+        failure_dlq: str,
+    ) -> None:
+        _run(event_job_cloudy, store.bucket, retry_queue, failure_dlq)
+
+        from tests.conftest import ACQUISITION_DATE, GRANULE_ID_STR, SAFE_ID
+
+        key = S3RecordStore.canonical_key("sentinel", ACQUISITION_DATE, SAFE_ID, 0)
+        s3 = __import__("boto3").client("s3", region_name="us-west-2")
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        assert record["current_state"] == "CLOUDY"
+
+        idx_key = S3RecordStore.output_index_key(
+            ProcessingState.CLOUDY, "sentinel", ACQUISITION_DATE, GRANULE_ID_STR
+        )
+        resp = s3.list_objects_v2(Bucket=store.bucket, Prefix=idx_key)
+        assert resp.get("KeyCount", 0) == 1
+
+        # Not routed to any queue
+        assert not sqs.receive_message(QueueUrl=retry_queue).get("Messages")
+        assert not sqs.receive_message(QueueUrl=failure_dlq).get("Messages")
+
+    def test_low_sun_angle(
+        self,
+        event_job_low_sun: JobChangeEvent,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue: str,
+        failure_dlq: str,
+    ) -> None:
+        _run(event_job_low_sun, store.bucket, retry_queue, failure_dlq)
+
+        from tests.conftest import ACQUISITION_DATE, SAFE_ID
+
+        key = S3RecordStore.canonical_key("sentinel", ACQUISITION_DATE, SAFE_ID, 0)
+        s3 = __import__("boto3").client("s3", region_name="us-west-2")
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        assert record["current_state"] == "LOW_SUN_ANGLE"
+
+    def test_nonretryable_routes_to_dlq(
+        self,
+        event_job_failed_error: JobChangeEvent,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue: str,
+        failure_dlq: str,
+    ) -> None:
+        _run(event_job_failed_error, store.bucket, retry_queue, failure_dlq)
+        msgs = sqs.receive_message(QueueUrl=failure_dlq).get("Messages", [])
+        assert len(msgs) == 1
+
+    def test_retryable_last_attempt_routes_to_retry_queue(
+        self,
+        event_job_failed_spot: JobChangeEvent,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue: str,
+        failure_dlq: str,
+    ) -> None:
+        _run(event_job_failed_spot, store.bucket, retry_queue, failure_dlq)
+        msgs = sqs.receive_message(QueueUrl=retry_queue).get("Messages", [])
+        assert len(msgs) == 1
+
+    def test_retryable_nonfinal_attempt_not_requeued(
+        self,
+        event_job_failed_spot_nonfinal: JobChangeEvent,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue: str,
+        failure_dlq: str,
+    ) -> None:
+        _run(event_job_failed_spot_nonfinal, store.bucket, retry_queue, failure_dlq)
+        msgs = sqs.receive_message(QueueUrl=retry_queue).get("Messages", [])
+        assert len(msgs) == 0
 
 
-def test_handler_retryable_failure_doesnt_requeue_nonfinal_attempt(
-    granule_id: GranuleId,
-    source_granule_id: str,
-    job_logger: GranuleLoggerService,
-    sqs: SQSClient,
-    retry_queue: str,
-    failure_dlq: str,
-    event_job_detail_change_failed: JobChangeEvent,
-    job_detail_failed_spot: JobDetailTypeDef,
-) -> None:
-    """Test behavior for Spot failure on last AWS Batch attempt
-
-    The handler should log the attempt and does NOT requeue it since AWS Batch will
-    retry it internally.
-    """
-    event = event_job_detail_change_failed.copy()
-    event["detail"] = job_detail_failed_spot
-    event["detail"]["attempts"] = [event["detail"]["attempts"][0]] * 1
-
-    job_monitor(
-        job_change_event=event,
-        logs_bucket=job_logger.bucket,
-        logs_prefix=job_logger.logs_prefix,
-        retry_queue_url=retry_queue,
-        failure_dlq_url=failure_dlq,
-    )
-
-    messages = sqs.receive_message(QueueUrl=retry_queue).get("Messages", [])
-    assert len(messages) == 0
-
-    events = job_logger.list_events(
-        granule_id=granule_id,
-        source_granule_id=source_granule_id,
-    )
-    assert len(events[ProcessingState.FAILURE_RETRYABLE]) == 1
-    assert ProcessingState.SUCCESS not in events
+# ---------------------------------------------------------------------------
+# Phase 0 (shadow mode, no WORKFLOW env var)
+# ---------------------------------------------------------------------------
 
 
-def test_handler_logs_success(
-    granule_id: GranuleId,
-    source_granule_id: str,
-    job_logger: GranuleLoggerService,
-    sqs: SQSClient,
-    retry_queue: str,
-    failure_dlq: str,
-    event_job_detail_change_failed: JobChangeEvent,
-) -> None:
-    """Test the handler"""
-    event = event_job_detail_change_failed.copy()
-    event["detail"]["container"]["exitCode"] = 0
-    job_monitor(
-        job_change_event=event,
-        logs_bucket=job_logger.bucket,
-        logs_prefix=job_logger.logs_prefix,
-        retry_queue_url=retry_queue,
-        failure_dlq_url=failure_dlq,
-    )
+class TestPhase0Shadow:
+    def test_shadow_sentinel_writes_two_events(
+        self,
+        event_job_shadow_sentinel: JobChangeEvent,
+        store: S3RecordStore,
+        sqs: SQSClient,
+        retry_queue: str,
+        failure_dlq: str,
+    ) -> None:
+        _run(event_job_shadow_sentinel, store.bucket, retry_queue, failure_dlq)
 
-    events = job_logger.list_events(
-        granule_id=granule_id,
-        source_granule_id=source_granule_id,
-    )
-    assert len(events[ProcessingState.SUCCESS]) == 1
-    assert events[ProcessingState.SUCCESS][0].attempt == 0
-    assert ProcessingState.FAILURE_RETRYABLE not in events
+        s3 = __import__("boto3").client("s3", region_name="us-west-2")
+        # Find canonical record — we don't know the exact acquisition_date easily
+        # so just list all canonical records and check there is one
+        resp = s3.list_objects_v2(Bucket=store.bucket, Prefix="records/sentinel/")
+        assert resp.get("KeyCount", 0) == 1
+
+        key = resp["Contents"][0]["Key"]
+        record = json.loads(s3.get_object(Bucket=store.bucket, Key=key)["Body"].read())
+        # Shadow records get two events: SUBMITTED (from createdAt) + terminal
+        assert len(record["events"]) == 2
+        assert record["events"][0]["state"] == "SUBMITTED"
+        assert record["shadow"] is True
+        assert record["current_state"] == "SUCCESS"

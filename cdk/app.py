@@ -1,6 +1,7 @@
 from aws_cdk import App, Tags
-from settings import StackSettings
 from stack import HlsStack
+
+from settings import StackSettings
 
 settings = StackSettings()
 

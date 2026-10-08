@@ -1,8 +1,10 @@
 import datetime as dt
 from typing import Annotated, Any, Literal
 
-from pydantic import BeforeValidator, model_validator
+from pydantic import BeforeValidator, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+from common.ancillary import ANCILLARY_SOURCES
 
 
 def include_trailing_slash(value: Any) -> Any:
@@ -81,6 +83,9 @@ class StackSettings(BaseSettings):
     SENTINEL_BUCKET_NAME: str
 
     AUX_DATA_BUCKET_NAME: str
+    # Where LaSRC's ancillary data comes from (see common.ancillary); the
+    # aux data bucket must hold that source's data
+    ANCILLARY_SOURCE: str = "lads"
 
     # Output bucket for processed products
     OUTPUT_BUCKET_NAME: str
@@ -183,6 +188,16 @@ class StackSettings(BaseSettings):
     PHASE0_LANDSAT_AC_JOB_DEFINITION_NAME: str | None = None
     PHASE0_LANDSAT_TILE_BATCH_QUEUE_ARN: str | None = None
     PHASE0_LANDSAT_TILE_JOB_DEFINITION_NAME: str | None = None
+
+    @field_validator("ANCILLARY_SOURCE")
+    @classmethod
+    def validate_ancillary_source(cls, value: str) -> str:
+        if value not in ANCILLARY_SOURCES:
+            raise ValueError(
+                f"Unknown ANCILLARY_SOURCE {value!r}; "
+                f"choose from {sorted(ANCILLARY_SOURCES)}"
+            )
+        return value
 
     @model_validator(mode="after")
     def validate_phase0_settings(self) -> "StackSettings":

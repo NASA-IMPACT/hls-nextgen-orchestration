@@ -7,6 +7,7 @@ import pytest
 from batch_event_job_monitor import S3RecordStore
 
 from ancillary_submit.handler import process_granule
+from common.ancillary import LadsSource
 from common.jobs import (
     AWAITING_ANCILLARY,
     SUBMITTED,
@@ -39,7 +40,7 @@ def _run(aux_bucket: str, output_bucket: str) -> bool:
         source_granule_ids=[SAFE_ID, TWIN_SAFE_ID],
         output_granule_id=GRANULE_ID_STR,
         attempt=1,
-        aux_bucket=aux_bucket,
+        ancillary=LadsSource(aux_bucket),
         batch_queue="test-queue",
         job_definition="test-jd",
         output_bucket=output_bucket,

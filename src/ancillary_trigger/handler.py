@@ -1,6 +1,6 @@
 """Ancillary-trigger Lambda — fan-out.
 
-Triggered when new ancillary (LaSRC LADS) data lands on S3. Lists the
+Triggered when new ancillary data lands on S3 (see common.ancillary). Lists the
 AWAITING_ANCILLARY state pointers for the data's acquisition date and enqueues
 one SQS message per output granule (so twin granules stay one job) to the
 internal ancillary-submit queue.

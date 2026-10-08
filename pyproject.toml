@@ -20,8 +20,7 @@ members = ["src"]
 
 [tool.uv.sources]
 src = { workspace = true }
-# TODO: pin the v0.3.0 release wheel once it is published
-batch-event-job-monitor = { git = "https://github.com/NASA-IMPACT/batch-event-job-monitor", rev = "603357cc9cc41775ca3a5bfd6d4ae5000807715b" }
+batch-event-job-monitor = { url = "https://github.com/NASA-IMPACT/batch-event-job-monitor/releases/download/v0.3.0/batch_event_job_monitor-0.3.0-py3-none-any.whl" }
 
 [dependency-groups]
 dev = [

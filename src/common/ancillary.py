@@ -35,19 +35,20 @@ class AncillarySource(ABC):
         """Whether the ancillary data for an acquisition date is available."""
 
 
-# Matches: lasrc_aux/LADS/YYYY/VJ104ANC.AYYYYDDD or VNP04ANC.AYYYYDDD
-_LADS_KEY_RE = re.compile(r"lasrc_aux/LADS/(\d{4})/(?:VJ104ANC|VNP04ANC)\.A(\d{7})")
-_LADS_PRODUCTS = ("VJ104ANC", "VNP04ANC")
+# Matches: lasrc_aux/LADS/YYYY/VJ104ANC.AYYYYDDD or VNP04ANC.AYYYYDDD. The aux
+# data bucket spells LAADS as "LADS" in its key prefix.
+_LAADS_KEY_RE = re.compile(r"lasrc_aux/LADS/(\d{4})/(?:VJ104ANC|VNP04ANC)\.A(\d{7})")
+_LAADS_PRODUCTS = ("VJ104ANC", "VNP04ANC")
 
 
 @dataclass(frozen=True)
-class LadsSource(AncillarySource):
-    """VIIRS LADS ancillary data (VJ104ANC or VNP04ANC), one file per day."""
+class LaadsSource(AncillarySource):
+    """VIIRS ancillary data from LAADS (VJ104ANC or VNP04ANC), one file per day."""
 
     bucket: str
 
     def acquisition_date(self, key: str) -> dt.date | None:
-        match = _LADS_KEY_RE.search(key)
+        match = _LAADS_KEY_RE.search(key)
         if match is None:
             return None
         try:
@@ -58,7 +59,7 @@ class LadsSource(AncillarySource):
     def is_available(self, acquisition_date: dt.date, s3_client: S3Client) -> bool:
         year = acquisition_date.strftime("%Y")
         ydoy = acquisition_date.strftime("%Y%j")
-        for product in _LADS_PRODUCTS:
+        for product in _LAADS_PRODUCTS:
             resp = s3_client.list_objects_v2(
                 Bucket=self.bucket,
                 Prefix=f"lasrc_aux/LADS/{year}/{product}.A{ydoy}",
@@ -70,7 +71,7 @@ class LadsSource(AncillarySource):
 
 
 ANCILLARY_SOURCES: dict[str, Callable[[str], AncillarySource]] = {
-    "lads": LadsSource,
+    "laads": LaadsSource,
 }
 """Ancillary source factories, given the aux data bucket, by the name
 ANCILLARY_SOURCE selects them with."""
@@ -79,9 +80,9 @@ ANCILLARY_SOURCE selects them with."""
 def ancillary_source_from_env() -> AncillarySource:
     """The ancillary source the Lambda environment selects.
 
-    Reads ANCILLARY_SOURCE (default "lads") and AUX_DATA_BUCKET_NAME.
+    Reads ANCILLARY_SOURCE (default "laads") and AUX_DATA_BUCKET_NAME.
     """
-    name = os.environ.get("ANCILLARY_SOURCE", "lads")
+    name = os.environ.get("ANCILLARY_SOURCE", "laads")
     try:
         source = ANCILLARY_SOURCES[name]
     except KeyError:

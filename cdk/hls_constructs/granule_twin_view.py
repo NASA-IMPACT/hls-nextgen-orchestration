@@ -7,8 +7,6 @@ predicates.
 
 from __future__ import annotations
 
-from typing import Any
-
 from aws_cdk import aws_glue as glue
 from batch_event_job_monitor_cdk.athena_common import create_presto_view
 from constructs import Construct
@@ -26,55 +24,48 @@ _COLUMNS = [
 ]
 
 
-class GranuleTwinView(Construct):
-    """The ``granule_twin_status`` view over the records table."""
-
-    def __init__(
-        self,
-        scope: Construct,
-        construct_id: str,
-        *,
-        database: glue.CfnDatabase,
-        database_name: str,
-        records_table: glue.CfnTable,
-        records_table_name: str,
-        view_name: str,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(scope, construct_id, **kwargs)
-
-        sql = f"""
+def create_granule_twin_view(
+    scope: Construct,
+    construct_id: str,
+    *,
+    database: glue.CfnDatabase,
+    database_name: str,
+    records_table: glue.CfnTable,
+    records_table_name: str,
+    view_name: str,
+) -> glue.CfnTable:
+    """Create the ``granule_twin_status`` view over the records table."""
+    sql = f"""
+    SELECT
+        r.input_entity_id,
+        r.output_entity_id,
+        r.job_type,
+        r.acquisition_date,
+        r.attempt,
+        r.batch_job_id,
+        r.current_state,
+        t.n_granules_in_job,
+        t.n_granules_in_job > 1   AS is_twin
+    FROM "{records_table_name}" r
+    JOIN (
         SELECT
-            r.input_entity_id,
-            r.output_entity_id,
-            r.job_type,
-            r.acquisition_date,
-            r.attempt,
-            r.batch_job_id,
-            r.current_state,
-            t.n_granules_in_job,
-            t.n_granules_in_job > 1   AS is_twin
-        FROM "{records_table_name}" r
-        JOIN (
-            SELECT
-                batch_job_id,
-                job_type,
-                acquisition_date,
-                count(*) AS n_granules_in_job
-            FROM "{records_table_name}"
-            GROUP BY batch_job_id, job_type, acquisition_date
-        ) t ON  r.batch_job_id     = t.batch_job_id
-            AND r.job_type         = t.job_type
-            AND r.acquisition_date = t.acquisition_date
-        """
-
-        self.view = create_presto_view(
-            self,
-            "View",
-            database=database,
-            database_name=database_name,
-            view_name=view_name,
-            sql=sql,
-            columns=_COLUMNS,
-            depends_on=records_table,
-        )
+            batch_job_id,
+            job_type,
+            acquisition_date,
+            count(*) AS n_granules_in_job
+        FROM "{records_table_name}"
+        GROUP BY batch_job_id, job_type, acquisition_date
+    ) t ON  r.batch_job_id     = t.batch_job_id
+        AND r.job_type         = t.job_type
+        AND r.acquisition_date = t.acquisition_date
+    """
+    return create_presto_view(
+        scope,
+        construct_id,
+        database=database,
+        database_name=database_name,
+        view_name=view_name,
+        sql=sql,
+        columns=_COLUMNS,
+        depends_on=records_table,
+    )

@@ -177,10 +177,13 @@ wheels = [
 
 [[package]]
 name = "batch-event-job-monitor"
-version = "0.2.3.dev9+g603357cc9"
-source = { git = "https://github.com/NASA-IMPACT/batch-event-job-monitor?rev=603357cc9cc41775ca3a5bfd6d4ae5000807715b#603357cc9cc41775ca3a5bfd6d4ae5000807715b" }
+version = "0.3.0"
+source = { url = "https://github.com/NASA-IMPACT/batch-event-job-monitor/releases/download/v0.3.0/batch_event_job_monitor-0.3.0-py3-none-any.whl" }
 dependencies = [
     { name = "boto3" },
+]
+wheels = [
+    { url = "https://github.com/NASA-IMPACT/batch-event-job-monitor/releases/download/v0.3.0/batch_event_job_monitor-0.3.0-py3-none-any.whl", hash = "sha256:654f8f806016512674c96177ec0d51c0fb72f92cbac7ad22fc44689a0d152831" },
 ]
 
 [package.optional-dependencies]
@@ -189,6 +192,15 @@ cdk = [
     { name = "aws-cdk-lib" },
     { name = "constructs" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "aws-cdk-aws-lambda-python-alpha", marker = "extra == 'cdk'", specifier = ">=2.191.0a0" },
+    { name = "aws-cdk-lib", marker = "extra == 'cdk'", specifier = ">=2.262.0" },
+    { name = "boto3" },
+    { name = "constructs", marker = "extra == 'cdk'", specifier = ">=10.4.2" },
+]
+provides-extras = ["cdk"]
 
 [[package]]
 name = "boto3"
@@ -624,7 +636,7 @@ dev = [
 requires-dist = [
     { name = "aws-cdk-aws-lambda-python-alpha", specifier = ">=2.191.0a0" },
     { name = "aws-cdk-lib", specifier = ">=2.188.0" },
-    { name = "batch-event-job-monitor", extras = ["cdk"], git = "https://github.com/NASA-IMPACT/batch-event-job-monitor?rev=603357cc9cc41775ca3a5bfd6d4ae5000807715b" },
+    { name = "batch-event-job-monitor", extras = ["cdk"], url = "https://github.com/NASA-IMPACT/batch-event-job-monitor/releases/download/v0.3.0/batch_event_job_monitor-0.3.0-py3-none-any.whl" },
     { name = "constructs", specifier = ">=10.4.2" },
 ]
 
@@ -1326,7 +1338,7 @@ dev = [
 requires-dist = [
     { name = "aws-lambda-powertools", marker = "extra == 'dev'", specifier = ">=3.3.0" },
     { name = "aws-xray-sdk", marker = "extra == 'dev'" },
-    { name = "batch-event-job-monitor", git = "https://github.com/NASA-IMPACT/batch-event-job-monitor?rev=603357cc9cc41775ca3a5bfd6d4ae5000807715b" },
+    { name = "batch-event-job-monitor", url = "https://github.com/NASA-IMPACT/batch-event-job-monitor/releases/download/v0.3.0/batch_event_job_monitor-0.3.0-py3-none-any.whl" },
     { name = "boto3-stubs", extras = ["batch", "s3", "sqs"], marker = "extra == 'dev'", specifier = ">=1.37.36" },
 ]
 provides-extras = ["dev"]

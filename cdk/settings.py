@@ -47,19 +47,11 @@ class StackSettings(BaseSettings):
             if not data.get("ATHENA_DATABASE_NAME"):
                 data["ATHENA_DATABASE_NAME"] = f"hls-nextgen-orchestration-{stage}"
 
-            if not data.get("JOB_RETRY_QUEUE_NAME"):
-                data["JOB_RETRY_QUEUE_NAME"] = f"hls-orch-retry-{stage}"
-
-            if not data.get("JOB_FAILURE_DLQ_NAME"):
-                data["JOB_FAILURE_DLQ_NAME"] = f"hls-orch-failure-{stage}"
-
             if not data.get("GRANULE_INIT_QUEUE_NAME"):
                 data["GRANULE_INIT_QUEUE_NAME"] = f"hls-orch-granule-init-{stage}"
 
             if not data.get("GRANULE_INIT_DLQ_NAME"):
-                data["GRANULE_INIT_DLQ_NAME"] = (
-                    f"hls-orch-granule-init-dlq-{stage}"
-                )
+                data["GRANULE_INIT_DLQ_NAME"] = f"hls-orch-granule-init-dlq-{stage}"
 
         return data
 
@@ -80,6 +72,11 @@ class StackSettings(BaseSettings):
 
     # ----- Buckets
     PROCESSING_BUCKET_NAME: str
+    # Parent prefix of every job monitoring object (records/, state/, outputs/,
+    # inventories) in the processing bucket
+    PROCESSING_KEY_PREFIX: Annotated[str, BeforeValidator(include_trailing_slash)] = (
+        "monitoring/"
+    )
 
     SENTINEL_BUCKET_NAME: str
 
@@ -125,10 +122,9 @@ class StackSettings(BaseSettings):
     MAX_ACTIVE_JOBS: int = 10_000
 
     # ----- Job retry system
-    # Send retryable failed AWS Batch jobs to this queue
-    JOB_RETRY_QUEUE_NAME: str
-    # Failed AWS Batch jobs go to a DLQ that can redrive to the retry queue
-    JOB_FAILURE_DLQ_NAME: str
+    # Attempts a job gets (each a separate Batch job) before a retryable
+    # failure, such as a spot interruption, is terminal
+    JOB_RETRY_MAX_ATTEMPTS: int = 3
 
     # ----- Granule-init trigger
     # SQS queue that receives S3 event notifications from the sentinel bucket
@@ -145,9 +141,10 @@ class StackSettings(BaseSettings):
     ANCILLARY_SUBMIT_DLQ_NAME: str
 
     # ----- Daily S3 Inventories (state/ and outputs/ prefixes -> Parquet)
-    # All inventories share one destination root. S3 writes each report under
-    # {INVENTORY_PREFIX}{source-bucket}/{inventory-id}/, so the per-inventory id
-    # namespaces the reports and one lifecycle rule / grant covers them all.
+    # All inventories share one destination root under PROCESSING_KEY_PREFIX. S3
+    # writes each report under {INVENTORY_PREFIX}{source-bucket}/{inventory-id}/, so
+    # the per-inventory id namespaces the reports and one lifecycle rule / grant
+    # covers them all.
     INVENTORY_PREFIX: Annotated[str, BeforeValidator(include_trailing_slash)] = (
         "inventories/"
     )

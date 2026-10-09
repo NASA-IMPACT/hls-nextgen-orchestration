@@ -91,8 +91,6 @@ class HlsStack(Stack):
             bucket_name=settings.AUX_DATA_BUCKET_NAME,
         )
 
-        # Keeps the construct path (and so the logical ID) of the bucket it
-        # replaced, so CloudFormation updates the existing bucket in place.
         self.processing = ProcessingBucket(
             self,
             "ProcessingBucket",
@@ -156,10 +154,6 @@ class HlsStack(Stack):
             ),
         ]
 
-        # The Athena construct ids keep the logical IDs of the tables they
-        # replaced: the table names are unchanged, and CloudFormation creates a
-        # replacement before deleting the original, so a new logical ID would
-        # collide with the existing table of the same name.
         self.athena_records = AthenaRecordsTable(
             self,
             "AthenaRecordsDatabase",

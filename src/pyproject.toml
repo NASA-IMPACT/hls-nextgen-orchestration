@@ -2,8 +2,10 @@
 name = "src"
 version = "0.1.0"
 description = "Common modules for lambdas"
-requires-python = ">=3.11"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "batch-event-job-monitor",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -11,6 +13,9 @@ dev = [
     "aws-lambda-powertools>=3.3.0",
     "aws-xray-sdk",
 ]
+
+[tool.uv.sources]
+batch-event-job-monitor = { url = "https://github.com/NASA-IMPACT/batch-event-job-monitor/releases/download/v0.3.0/batch_event_job_monitor-0.3.0-py3-none-any.whl" }
 
 [build-system]
 requires = ["hatchling"]

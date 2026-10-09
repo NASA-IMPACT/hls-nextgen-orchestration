@@ -1,13 +1,12 @@
 from typing import Any
 
 from aws_cdk import (
+    ArnFormat,
     Aws,
     Duration,
     RemovalPolicy,
     Stack,
     aws_ec2 as ec2,
-    aws_events as events,
-    aws_events_targets as events_targets,
     aws_glue as glue,
     aws_iam as iam,
     aws_lambda as lambda_,
@@ -17,17 +16,32 @@ from aws_cdk import (
     aws_s3_notifications as s3_notifications,
     aws_sqs as sqs,
 )
+from batch_event_job_monitor.models import JobTypeConfig
+from batch_event_job_monitor_cdk import (
+    AthenaOutputsTable,
+    AthenaRecordsTable,
+    AthenaStateTable,
+    JobMonitorFunction,
+    JobResubmitFunction,
+    MonitoringQueues,
+    PartitionKeySpec,
+    ProcessingBucket,
+    job_definition_family_arn,
+)
 from constructs import Construct
 
-from hls_constructs import (
-    AthenaOutputsDatabase,
-    AthenaRecordsDatabase,
-    AthenaStateDatabase,
-    BatchInfra,
-    BatchJob,
-    ProcessingBucket,
-    QueueWithDlq,
+from common.jobs import (
+    ACQUISITION_DATE,
+    JOB_TYPES,
+    PHASE0_LANDSAT_AC,
+    PHASE0_LANDSAT_TILE,
+    PHASE0_SENTINEL,
+    SENTINEL,
+    phase0_job_type_config,
+    sentinel_job_type_config,
 )
+from hls_constructs import BatchInfra, BatchJob, QueueWithDlq, create_granule_twin_view
+from hls_constructs.lambda_bundling import export_requirements
 from settings import StackSettings
 
 LAMBDA_EXCLUDE = [
@@ -56,6 +70,8 @@ class HlsStack(Stack):
     ) -> None:
         super().__init__(scope, stack_id, **kwargs)
 
+        export_requirements("src/", "src")
+
         if settings.MCP_IAM_PERMISSION_BOUNDARY_ARN:
             boundary = iam.ManagedPolicy.from_managed_policy_arn(
                 self,
@@ -78,15 +94,18 @@ class HlsStack(Stack):
             bucket_name=settings.AUX_DATA_BUCKET_NAME,
         )
 
-        _processing = ProcessingBucket(
+        self.processing = ProcessingBucket(
             self,
             "ProcessingBucket",
             bucket_name=settings.PROCESSING_BUCKET_NAME,
+            key_prefix=settings.PROCESSING_KEY_PREFIX,
             inventory_prefix=settings.INVENTORY_PREFIX,
-            state_inventory_id=settings.STATE_INVENTORY_ID,
-            outputs_inventory_id=settings.OUTPUTS_INVENTORY_ID,
+            inventories=[
+                (settings.STATE_INVENTORY_ID, "state/"),
+                (settings.OUTPUTS_INVENTORY_ID, "outputs/"),
+            ],
         )
-        self.processing_bucket = _processing.bucket
+        self.processing_bucket = self.processing.bucket
 
         # FIXME: this bucket already exists, so import it post-MVP
         self.output_bucket = self._make_bucket(
@@ -121,41 +140,67 @@ class HlsStack(Stack):
             ),
         )
 
-        self.athena_records_db = AthenaRecordsDatabase(
+        partition_keys = [
+            PartitionKeySpec(
+                name="job_type",
+                glue_type="string",
+                projection="enum",
+                enum_values=JOB_TYPES,
+            ),
+            PartitionKeySpec(
+                name=ACQUISITION_DATE,
+                glue_type="string",
+                projection="date",
+                date_range=(settings.ATHENA_RECORDS_TABLE_START_DATE, "NOW"),
+                date_format="yyyy-MM-dd",
+                date_interval_unit="DAYS",
+            ),
+        ]
+
+        self.athena_records = AthenaRecordsTable(
             self,
             "AthenaRecordsDatabase",
             database=self.athena_database,
             database_name=settings.ATHENA_DATABASE_NAME,
             records_bucket_name=settings.PROCESSING_BUCKET_NAME,
-            table_date_range_start=settings.ATHENA_RECORDS_TABLE_START_DATE,
+            key_prefix=self.processing.key_prefix,
+            partition_keys=partition_keys,
             table_name=settings.ATHENA_RECORDS_TABLE_NAME,
-            twin_view_name=settings.ATHENA_RECORDS_TWIN_VIEW_NAME,
         )
-
-        self.athena_state_db = AthenaStateDatabase(
+        self.granule_twin_view = create_granule_twin_view(
+            self.athena_records,
+            "TwinView",
+            database=self.athena_database,
+            database_name=settings.ATHENA_DATABASE_NAME,
+            records_table=self.athena_records.records_table,
+            records_table_name=settings.ATHENA_RECORDS_TABLE_NAME,
+            view_name=settings.ATHENA_RECORDS_TWIN_VIEW_NAME,
+        )
+        self.athena_state = AthenaStateTable(
             self,
             "AthenaStateDatabase",
             database=self.athena_database,
             database_name=settings.ATHENA_DATABASE_NAME,
-            inventory_location_s3path=self._inventory_location(
-                settings, settings.STATE_INVENTORY_ID
+            inventory_location_s3path=self.processing.inventory_location(
+                settings.STATE_INVENTORY_ID
             ),
             table_datetime_start=settings.ATHENA_STATE_TABLE_START_DATETIME,
             table_name=settings.ATHENA_STATE_TABLE_NAME,
             view_name=settings.ATHENA_STATE_VIEW_NAME,
+            partition_keys=partition_keys,
         )
-
-        self.athena_outputs_db = AthenaOutputsDatabase(
+        self.athena_outputs = AthenaOutputsTable(
             self,
             "AthenaOutputsDatabase",
             database=self.athena_database,
             database_name=settings.ATHENA_DATABASE_NAME,
-            inventory_location_s3path=self._inventory_location(
-                settings, settings.OUTPUTS_INVENTORY_ID
+            inventory_location_s3path=self.processing.inventory_location(
+                settings.OUTPUTS_INVENTORY_ID
             ),
             table_datetime_start=settings.ATHENA_OUTPUTS_TABLE_START_DATETIME,
             table_name=settings.ATHENA_OUTPUTS_TABLE_NAME,
             view_name=settings.ATHENA_OUTPUTS_VIEW_NAME,
+            partition_keys=partition_keys,
         )
 
         # ----------------------------------------------------------------------
@@ -229,104 +274,40 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # Job monitor & retry system
         # ----------------------------------------------------------------------
-        self.job_retry = QueueWithDlq(
-            self,
-            "JobRetryQueue",
-            queue_name=settings.JOB_RETRY_QUEUE_NAME,
-            dlq_name=settings.JOB_FAILURE_DLQ_NAME,
-            visibility_timeout=Duration.minutes(2),
-            max_receive_count=1,
+        sentinel_config = sentinel_job_type_config(
+            job_queue_arn=self.batch_infra.queue.job_queue_arn,
+            job_definition_arn=job_definition_family_arn(self.sentinel_ac_job.job_def),
+            max_attempts=settings.JOB_RETRY_MAX_ATTEMPTS,
         )
 
-        self.job_monitor_lambda = lambda_python.PythonFunction(
+        self.monitoring_queues = MonitoringQueues(self, "MonitoringQueues")
+
+        self.job_monitor = JobMonitorFunction(
             self,
-            "JobMonitorHandler",
+            "JobMonitor",
+            processing_bucket=self.processing_bucket,
+            key_prefix=self.processing.key_prefix,
+            job_type_configs={
+                SENTINEL: sentinel_config,
+                **self._phase0_job_type_configs(settings),
+            },
+            queues=self.monitoring_queues,
             entry="src/",
             index="job_monitor/handler.py",
-            handler="handler",
-            runtime=lambda_.Runtime.PYTHON_3_12,
-            memory_size=256,
-            timeout=Duration.minutes(1),
-            environment={
-                "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
-                "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
-                "JOB_RETRY_QUEUE_URL": self.job_retry.queue.queue_url,
-                "JOB_FAILURE_DLQ_URL": self.job_retry.dlq.queue_url,
-                "PROCESSING_JOB_RETRY_ATTEMPTS": str(
-                    settings.PROCESSING_JOB_RETRY_ATTEMPTS
-                ),
-            },
-            bundling=lambda_python.BundlingOptions(
-                asset_excludes=LAMBDA_EXCLUDE,
-            ),
-        )
-        self.processing_bucket.grant_read_write(self.job_monitor_lambda)
-        self.job_retry.queue.grant_send_messages(self.job_monitor_lambda)
-        self.job_retry.dlq.grant_send_messages(self.job_monitor_lambda)
-
-        # EventBridge rule: Batch job state changes from our queue/job definition
-        self.processing_job_events_rule = events.Rule(
-            self,
-            "ProcessingJobEventsRule",
-            event_pattern=events.EventPattern(
-                source=["aws.batch"],
-                detail={
-                    "jobQueue": [self.batch_infra.queue.job_queue_arn],
-                    "jobDefinition": [
-                        {
-                            "wildcard": (
-                                f"*{self.sentinel_ac_job.job_def.job_definition_name}*"
-                            )
-                        },
-                    ],
-                    "status": ["FAILED", "SUCCEEDED"],
-                },
-            ),
-            targets=[
-                events_targets.LambdaFunction(
-                    handler=self.job_monitor_lambda,
-                    retry_attempts=3,
-                )
-            ],
+            bundling=lambda_python.BundlingOptions(asset_excludes=LAMBDA_EXCLUDE),
         )
 
-        self._setup_phase0_shadow(settings)
-
-        # ----------------------------------------------------------------------
-        # Job requeuer
-        # ----------------------------------------------------------------------
-        self.job_requeuer_lambda = lambda_python.PythonFunction(
+        # Only this system's own jobs are resubmitted; the existing system
+        # retries its own.
+        self.job_resubmit = JobResubmitFunction(
             self,
-            "JobRequeuerHandler",
+            "JobResubmit",
+            job_type_configs={SENTINEL: sentinel_config},
+            retry_queue=self.monitoring_queues.retry_queue,
             entry="src/",
-            index="job_requeuer/handler.py",
-            handler="handler",
-            runtime=lambda_.Runtime.PYTHON_3_12,
-            memory_size=256,
-            timeout=Duration.minutes(1),
-            environment={
-                "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
-                "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
-                "BATCH_JOB_DEFINITION_NAME": (
-                    self.sentinel_ac_job.job_def.job_definition_name
-                ),
-                "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
-            },
-            bundling=lambda_python.BundlingOptions(
-                asset_excludes=LAMBDA_EXCLUDE,
-            ),
-        )
-
-        self.job_requeuer_lambda.add_to_role_policy(self.batch_submit_job_policy)
-        self.processing_bucket.grant_read_write(self.job_requeuer_lambda)
-        self.job_retry.queue.grant_consume_messages(self.job_requeuer_lambda)
-
-        self.job_requeuer_lambda.add_event_source_mapping(
-            "JobRequeuerRetryQueueTrigger",
-            batch_size=100,
-            max_batching_window=Duration.minutes(1),
-            report_batch_item_failures=True,
-            event_source_arn=self.job_retry.queue.queue_arn,
+            index="job_resubmit/handler.py",
+            environment={"OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name},
+            bundling=lambda_python.BundlingOptions(asset_excludes=LAMBDA_EXCLUDE),
         )
 
         # ----------------------------------------------------------------------
@@ -357,6 +338,7 @@ class HlsStack(Stack):
             timeout=Duration.minutes(10),
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
+                "PROCESSING_KEY_PREFIX": self.processing.key_prefix,
                 "SENTINEL_BUCKET_NAME": self.sentinel_bucket.bucket_name,
                 "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
                 "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
@@ -432,6 +414,7 @@ class HlsStack(Stack):
             timeout=Duration.minutes(2),
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
+                "PROCESSING_KEY_PREFIX": self.processing.key_prefix,
                 "ANCILLARY_SUBMIT_QUEUE_URL": self.ancillary_submit.queue.queue_url,
             },
             layers=[self.powertools_layer],
@@ -468,6 +451,7 @@ class HlsStack(Stack):
             timeout=Duration.minutes(2),
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
+                "PROCESSING_KEY_PREFIX": self.processing.key_prefix,
                 "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "SENTINEL_JOB_DEFINITION_NAME": (
@@ -494,50 +478,41 @@ class HlsStack(Stack):
             event_source_arn=self.ancillary_submit.queue.queue_arn,
         )
 
-    def _setup_phase0_shadow(self, settings: StackSettings) -> None:
-        """Wire up Phase 0 shadow observability against the existing system.
+    def _phase0_job_type_configs(
+        self, settings: StackSettings
+    ) -> dict[str, JobTypeConfig]:
+        """Shadow-monitoring configs for the existing system's job types.
 
-        Adds an EventBridge rule that routes completed Batch jobs from the existing
-        queue/job-definition to the same job_monitor Lambda, which writes shadow=True
-        canonical records. Delete or disable this method once Phase 1 is fully deployed.
+        Empty unless the Phase 0 settings are set. Remove once Phase 1 is fully
+        deployed.
         """
-        if not (
-            settings.PHASE0_SENTINEL_BATCH_QUEUE_ARN
-            and settings.PHASE0_SENTINEL_JOB_DEFINITION_NAME
-        ):
-            return
-
-        job_def_wildcards = [
-            {"wildcard": f"*{job_def_name}*"}
-            for job_def_name in (
+        phase0 = {
+            PHASE0_SENTINEL: (
+                settings.PHASE0_SENTINEL_BATCH_QUEUE_ARN,
                 settings.PHASE0_SENTINEL_JOB_DEFINITION_NAME,
-                settings.PHASE0_LANDSAT_AC_JOB_DEFINITION_NAME,
-                settings.PHASE0_LANDSAT_TILE_JOB_DEFINITION_NAME,
-            )
-        ]
-
-        self.phase0_job_events_rule = events.Rule(
-            self,
-            "Phase0JobEventsRule",
-            event_pattern=events.EventPattern(
-                source=["aws.batch"],
-                detail={
-                    "jobQueue": [
-                        settings.PHASE0_SENTINEL_BATCH_QUEUE_ARN,
-                        settings.PHASE0_LANDSAT_AC_BATCH_QUEUE_ARN,
-                        settings.PHASE0_LANDSAT_TILE_BATCH_QUEUE_ARN,
-                    ],
-                    "jobDefinition": job_def_wildcards,
-                    "status": ["FAILED", "SUCCEEDED"],
-                },
             ),
-            targets=[
-                events_targets.LambdaFunction(
-                    handler=self.job_monitor_lambda,
-                    retry_attempts=3,
-                )
-            ],
-        )
+            PHASE0_LANDSAT_AC: (
+                settings.PHASE0_LANDSAT_AC_BATCH_QUEUE_ARN,
+                settings.PHASE0_LANDSAT_AC_JOB_DEFINITION_NAME,
+            ),
+            PHASE0_LANDSAT_TILE: (
+                settings.PHASE0_LANDSAT_TILE_BATCH_QUEUE_ARN,
+                settings.PHASE0_LANDSAT_TILE_JOB_DEFINITION_NAME,
+            ),
+        }
+        return {
+            job_type: phase0_job_type_config(
+                job_queue_arn=job_queue_arn,
+                job_definition_arn=self.format_arn(
+                    service="batch",
+                    resource="job-definition",
+                    resource_name=job_definition_name,
+                    arn_format=ArnFormat.SLASH_RESOURCE_NAME,
+                ),
+            )
+            for job_type, (job_queue_arn, job_definition_name) in phase0.items()
+            if job_queue_arn and job_definition_name
+        }
 
     def _make_bucket(self, construct_id: str, bucket_name: str) -> s3.Bucket:
         """Create a stack-managed S3 bucket with standard settings.
@@ -560,14 +535,3 @@ class HlsStack(Stack):
                 ),
             ],
         )
-
-    @staticmethod
-    def _inventory_location(settings: StackSettings, inventory_id: str) -> str:
-        """S3 path of an inventory's Hive symlink manifests.
-
-        S3 writes reports under {prefix}{source-bucket}/{inventory-id}/, with the
-        Hive-style symlink manifests (dt=.../symlink.txt) under the hive/ subprefix
-        that SymlinkTextInputFormat reads.
-        """
-        bucket = settings.PROCESSING_BUCKET_NAME
-        return f"s3://{bucket}/{settings.INVENTORY_PREFIX}{bucket}/{inventory_id}/hive/"

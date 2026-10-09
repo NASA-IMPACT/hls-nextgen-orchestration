@@ -7,10 +7,11 @@ authors = [
   {name = "Sean Harkins", email = "sean@developmentseed.org"}
 ]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "aws-cdk-aws-lambda-python-alpha>=2.191.0a0",
     "aws-cdk-lib>=2.188.0",
+    "batch-event-job-monitor[cdk]",
     "constructs>=10.4.2",
 ]
 
@@ -19,6 +20,7 @@ members = ["src"]
 
 [tool.uv.sources]
 src = { workspace = true }
+batch-event-job-monitor = { url = "https://github.com/NASA-IMPACT/batch-event-job-monitor/releases/download/v0.3.0/batch_event_job_monitor-0.3.0-py3-none-any.whl" }
 
 [dependency-groups]
 dev = [
@@ -41,11 +43,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/common", "src/granule_init", "src/ancillary_trigger", "src/job_monitor", "src/job_requeuer"]
+packages = ["src/common", "src/granule_init", "src/ancillary_trigger", "src/ancillary_submit", "src/job_monitor", "src/job_resubmit"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py312"
 exclude = ["cdk.out", ".venv", "node_modules"]
 
 [tool.ruff.lint]
@@ -63,8 +65,9 @@ known-first-party = [
   "common",
   "granule_init",
   "ancillary_trigger",
+  "ancillary_submit",
   "job_monitor",
-  "job_requeuer",
+  "job_resubmit",
   "hls_constructs",
   "settings",
 ]

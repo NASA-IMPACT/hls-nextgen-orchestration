@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
-from dataclasses import asdict, dataclass, field
-from enum import Enum, auto, unique
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -12,31 +10,16 @@ if TYPE_CHECKING:
 EXIT_CODE_LOW_SUN_ANGLE = 3
 EXIT_CODE_CLOUDY = 4
 
-TERMINAL_STATES: frozenset[ProcessingState]
-
-
-@unique
-class ProcessingState(Enum):
-    """Potential state for granule processing"""
-
-    SUCCESS = auto()
-    CLOUDY = auto()
-    LOW_SUN_ANGLE = auto()
-    FAILURE_RETRYABLE = auto()
-    FAILURE_NONRETRYABLE = auto()
-    AWAITING = auto()
-    SUBMITTED = auto()
-
-    def is_terminal(self) -> bool:
-        return self in (
-            ProcessingState.SUCCESS,
-            ProcessingState.CLOUDY,
-            ProcessingState.LOW_SUN_ANGLE,
-            ProcessingState.FAILURE_NONRETRYABLE,
-        )
-
-
 HLS_GRANULE_ID_STRFTIME = "%Y%jT%H%M%S"
+
+
+def convert_safe_id_to_hls_id(safe_id: str) -> str:
+    """Convert a Sentinel-2 SAFE ID to an HLS S30 granule ID."""
+    parts = safe_id.split("_")
+    date_str = parts[2][:15]
+    acq_dt = dt.datetime.strptime(date_str[:8], "%Y%m%d")
+    doy = f"{acq_dt.timetuple().tm_yday:03d}"
+    return f"HLS.S30.{parts[5]}.{acq_dt.year}{doy}{date_str[8:15]}.v2.0"
 
 
 @dataclass
@@ -83,25 +66,14 @@ class GranuleId:
 
 @dataclass(frozen=True)
 class GranuleProcessingEvent:
-    """Event message for granule processing jobs"""
+    """The container environment for a granule processing job"""
 
     workflow: str
     acquisition_date: str  # YYYY-MM-DD
     source_granule_ids: list[str] = field(default_factory=list)
     output_granule_id: str = ""
-    attempt: int = 0
+    attempt: int = 1
     debug_bucket: str | None = None
-
-    def new_attempt(self) -> GranuleProcessingEvent:
-        """Return a new GranuleProcessingEvent for another attempt"""
-        return GranuleProcessingEvent(
-            workflow=self.workflow,
-            acquisition_date=self.acquisition_date,
-            source_granule_ids=list(self.source_granule_ids),
-            output_granule_id=self.output_granule_id,
-            attempt=self.attempt + 1,
-            debug_bucket=self.debug_bucket,
-        )
 
     def to_envvar(self) -> dict[str, str]:
         """Convert this event to environment variables"""
@@ -116,43 +88,8 @@ class GranuleProcessingEvent:
             envvars["DEBUG_BUCKET"] = self.debug_bucket
         return envvars
 
-    @classmethod
-    def from_envvar(cls, env: dict[str, str]) -> GranuleProcessingEvent:
-        """Parse from provided environment variables
-
-        Raises
-        ------
-        KeyError
-            Raised if the expected keys aren't in the envvars provided
-        """
-        return cls(
-            workflow=env["WORKFLOW"],
-            acquisition_date=env["ACQUISITION_DATE"],
-            source_granule_ids=env["SOURCE_GRANULE_IDS"].split(","),
-            output_granule_id=env["OUTPUT_GRANULE_ID"],
-            attempt=int(env["ATTEMPT"]),
-            debug_bucket=env.get("DEBUG_BUCKET"),
-        )
-
     def to_environment(self) -> list[KeyValuePairTypeDef]:
         """Format as a container environment definition"""
         return [
             {"name": key, "value": value} for key, value in self.to_envvar().items()
         ]
-
-    @classmethod
-    def from_json(cls, json_str: str) -> GranuleProcessingEvent:
-        """Load from a JSON string"""
-        data = json.loads(json_str)
-        return cls(
-            workflow=data["workflow"],
-            acquisition_date=data["acquisition_date"],
-            source_granule_ids=data["source_granule_ids"],
-            output_granule_id=data["output_granule_id"],
-            attempt=data["attempt"],
-            debug_bucket=data.get("debug_bucket"),
-        )
-
-    def to_json(self) -> str:
-        """Dump to a JSON string"""
-        return json.dumps(asdict(self))

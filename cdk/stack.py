@@ -41,6 +41,7 @@ from common.jobs import (
     sentinel_job_type_config,
 )
 from hls_constructs import BatchInfra, BatchJob, QueueWithDlq, create_granule_twin_view
+from hls_constructs.lambda_bundling import export_requirements
 from settings import StackSettings
 
 LAMBDA_EXCLUDE = [
@@ -68,6 +69,8 @@ class HlsStack(Stack):
         self, scope: Construct, stack_id: str, *, settings: StackSettings, **kwargs: Any
     ) -> None:
         super().__init__(scope, stack_id, **kwargs)
+
+        export_requirements("src/", "src")
 
         if settings.MCP_IAM_PERMISSION_BOUNDARY_ARN:
             boundary = iam.ManagedPolicy.from_managed_policy_arn(

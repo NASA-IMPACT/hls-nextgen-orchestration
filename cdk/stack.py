@@ -342,6 +342,7 @@ class HlsStack(Stack):
                 "SENTINEL_BUCKET_NAME": self.sentinel_bucket.bucket_name,
                 "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
                 "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
+                "ANCILLARY_SOURCE": settings.ANCILLARY_SOURCE,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "MAX_ACTIVE_JOBS": str(settings.MAX_ACTIVE_JOBS),
                 "SENTINEL_JOB_DEFINITION_NAME": (
@@ -416,6 +417,8 @@ class HlsStack(Stack):
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "PROCESSING_KEY_PREFIX": self.processing.key_prefix,
                 "ANCILLARY_SUBMIT_QUEUE_URL": self.ancillary_submit.queue.queue_url,
+                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
+                "ANCILLARY_SOURCE": settings.ANCILLARY_SOURCE,
             },
             layers=[self.powertools_layer],
             bundling=lambda_python.BundlingOptions(
@@ -453,6 +456,7 @@ class HlsStack(Stack):
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "PROCESSING_KEY_PREFIX": self.processing.key_prefix,
                 "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
+                "ANCILLARY_SOURCE": settings.ANCILLARY_SOURCE,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "SENTINEL_JOB_DEFINITION_NAME": (
                     self.sentinel_ac_job.job_def.job_definition_name

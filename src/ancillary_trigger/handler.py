@@ -1,6 +1,6 @@
 """Ancillary-trigger Lambda — fan-out.
 
-Triggered when new ancillary (LaSRC LADS) data lands on S3. Lists the
+Triggered when new ancillary data lands on S3 (see common.ancillary). Lists the
 AWAITING_ANCILLARY state pointers for the data's acquisition date and enqueues
 one SQS message per output granule (so twin granules stay one job) to the
 internal ancillary-submit queue.
@@ -14,10 +14,8 @@ each granule with a conditional SUBMITTED state pointer before submitting.
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import os
-import re
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
@@ -28,29 +26,11 @@ if TYPE_CHECKING:
 from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
+from common.ancillary import ancillary_source_from_env
 from common.jobs import ACQUISITION_DATE, AWAITING_ANCILLARY, SENTINEL, record_store
 
 logger = Logger()
 tracer = Tracer()
-
-# Matches: lasrc_aux/LADS/YYYY/VJ104ANC.AYYYYDDD  or VNP04ANC.AYYYYDDD
-_AUX_KEY_RE = re.compile(r"lasrc_aux/LADS/(\d{4})/(?:VJ104ANC|VNP04ANC)\.A(\d{7})")
-
-
-def _parse_aux_key(s3_key: str) -> str | None:
-    """Extract YYYY-MM-DD acquisition date from an ancillary S3 key.
-
-    Returns None if the key does not match the expected pattern.
-    """
-    m = _AUX_KEY_RE.search(s3_key)
-    if not m:
-        return None
-    ydoy = m.group(2)  # YYYYDDD
-    try:
-        acq_dt = dt.datetime.strptime(ydoy, "%Y%j")
-        return acq_dt.strftime("%Y-%m-%d")
-    except ValueError:
-        return None
 
 
 @tracer.capture_method
@@ -63,10 +43,11 @@ def process_aux_event(
 
     Returns the number of messages enqueued.
     """
-    acquisition_date = _parse_aux_key(s3_key)
-    if acquisition_date is None:
+    date = ancillary_source_from_env().acquisition_date(s3_key)
+    if date is None:
         logger.info("Key %s is not a recognised ancillary file; skipping", s3_key)
         return 0
+    acquisition_date = date.isoformat()
 
     store = record_store()
     sqs = boto3.client("sqs")

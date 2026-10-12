@@ -107,13 +107,16 @@ class HlsStack(Stack):
         )
         self.processing_bucket = self.processing.bucket
 
+        delete_bucket = settings.STAGE == "dev"
         # FIXME: this bucket already exists, so import it post-MVP
         self.output_bucket = self._make_bucket(
-            "OutputBucket", settings.OUTPUT_BUCKET_NAME
+            "OutputBucket", settings.OUTPUT_BUCKET_NAME, delete=delete_bucket
         )
         # FIXME: this bucket already exists, so import it post-MVP
         self.sentinel_bucket = self._make_bucket(
-            "SentinelBucket", settings.SENTINEL_BUCKET_NAME
+            "SentinelBucket",
+            settings.SENTINEL_BUCKET_NAME,
+            delete=delete_bucket,
         )
 
         self.debug_bucket: s3.IBucket | None
@@ -518,7 +521,13 @@ class HlsStack(Stack):
             if job_queue_arn and job_definition_name
         }
 
-    def _make_bucket(self, construct_id: str, bucket_name: str) -> s3.Bucket:
+    def _make_bucket(
+        self,
+        construct_id: str,
+        bucket_name: str,
+        *,
+        delete: bool,
+    ) -> s3.Bucket:
         """Create a stack-managed S3 bucket with standard settings.
 
         Applies S3-managed encryption, SSL-only access policy, and lifecycle
@@ -528,7 +537,6 @@ class HlsStack(Stack):
             self,
             construct_id,
             bucket_name=bucket_name,
-            removal_policy=RemovalPolicy.DESTROY,
             enforce_ssl=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             lifecycle_rules=[
@@ -538,4 +546,10 @@ class HlsStack(Stack):
                     noncurrent_version_expiration=Duration.days(1),
                 ),
             ],
+            removal_policy=(
+                RemovalPolicy.DESTROY
+                if delete
+                else RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE
+            ),
+            auto_delete_objects=delete,
         )

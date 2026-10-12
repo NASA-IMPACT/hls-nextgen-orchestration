@@ -22,6 +22,7 @@ class BatchInfra(Construct):
         instance_classes: list[str] | None,
         max_vcpu: int,
         ami_id: str,
+        base_name: str,
         stage: str,
         **kwargs: Any,
     ) -> None:
@@ -42,6 +43,9 @@ class BatchInfra(Construct):
             AWS Batch Ec2 instance AMI identifier, OR name of SSM parameter that
             references the AMI ID prefixed by `resolve:ssm` (e.g,
             `resolve:ssm:/param-name`).
+        base_name:
+            Base name prefix for AWS resources. The ComputeEnvironment and JobQueue
+            will be named ``{base_name}-{stage}``.
         stage:
             Environment or "stage" for resources used to help distinguish resources
             from this stack.
@@ -138,7 +142,7 @@ class BatchInfra(Construct):
         self.queue = batch.JobQueue(
             self,
             "JobQueue",
-            job_queue_name=f"hls-vi-historical-orchestration-{stage}-job-queue",
+            job_queue_name=f"{base_name}-{stage}",
         )
         self.queue.add_compute_environment(self.compute_environment, 1)
 

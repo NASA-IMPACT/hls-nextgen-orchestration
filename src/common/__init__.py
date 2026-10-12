@@ -1,17 +1,22 @@
 from .aws_batch import AwsBatchClient, JobChangeEvent, JobDetails
-from .granule_logger import (
-    GranuleEventLog,
-    GranuleLoggerService,
+from .models import (
+    EXIT_CODE_CLOUDY,
+    EXIT_CODE_LOW_SUN_ANGLE,
+    GranuleId,
+    GranuleProcessingEvent,
+    ProcessingState,
 )
-from .models import GranuleId, GranuleProcessingEvent, ProcessingState
+from .record_store import ProcessingEventRecord, S3RecordStore
 
 __all__ = [
     "AwsBatchClient",
+    "EXIT_CODE_CLOUDY",
+    "EXIT_CODE_LOW_SUN_ANGLE",
     "GranuleId",
     "GranuleProcessingEvent",
     "JobChangeEvent",
     "JobDetails",
-    "GranuleEventLog",
-    "GranuleLoggerService",
+    "ProcessingEventRecord",
     "ProcessingState",
+    "S3RecordStore",
 ]

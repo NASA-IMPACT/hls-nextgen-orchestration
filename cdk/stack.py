@@ -244,6 +244,7 @@ class HlsStack(Stack):
             "INPUT_BUCKET": self.sentinel_bucket.bucket_name,
             "OUTPUT_BUCKET": self.output_bucket.bucket_name,
             "GIBS_OUTPUT_BUCKET": self.gibs_output_bucket.bucket_name,
+            "VIIRS_AUX_STARTING_DATE": settings.VIIRS_AUX_STARTING_DATE,
         }
         if self.debug_bucket is not None:
             sentinel_environment["DEBUG_BUCKET"] = self.debug_bucket.bucket_name

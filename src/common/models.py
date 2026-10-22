@@ -80,7 +80,7 @@ class GranuleProcessingEvent:
         envvars: dict[str, str] = {
             "WORKFLOW": self.workflow,
             "ACQUISITION_DATE": self.acquisition_date,
-            "SOURCE_GRANULE_IDS": ",".join(self.source_granule_ids),
+            "GRANULE_LIST": ",".join(self.source_granule_ids),
             "OUTPUT_GRANULE_ID": self.output_granule_id,
             "ATTEMPT": str(self.attempt),
         }

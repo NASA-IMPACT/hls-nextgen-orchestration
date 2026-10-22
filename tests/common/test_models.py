@@ -46,7 +46,7 @@ class TestGranuleProcessingEvent:
         env = event.to_envvar()
         assert env["WORKFLOW"] == "sentinel"
         assert env["ACQUISITION_DATE"] == "2024-01-15"
-        assert env["SOURCE_GRANULE_IDS"] == "S2A_one,S2A_two"
+        assert env["GRANULE_LIST"] == "S2A_one,S2A_two"
         assert env["OUTPUT_GRANULE_ID"] == "HLS.S30.T18TYN.2024015T154921.v2.0"
         assert env["ATTEMPT"] == "2"
         assert env.get("DEBUG_BUCKET") == debug_bucket

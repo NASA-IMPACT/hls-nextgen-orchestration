@@ -96,8 +96,8 @@ class StackSettings(BaseSettings):
     # ----- HLS processing
     SENTINEL_CONTAINER_ECR_URI: str
     # Job vCPU and memory limits
-    SENTINEL_JOB_VCPU: int = 1
-    SENTINEL_JOB_MEMORY_MB: int = 2_000
+    SENTINEL_JOB_VCPU: int = 2
+    SENTINEL_JOB_MEMORY_MB: int = 20_000
     # Number of internal AWS Batch job retries
     PROCESSING_JOB_RETRY_ATTEMPTS: int = 3
 

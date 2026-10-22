@@ -73,7 +73,7 @@ class TestBuildSubmitJobParams:
             "OUTPUT_BUCKET": "outputs",
             "WORKFLOW": "sentinel",
             "ACQUISITION_DATE": ACQUISITION_DATE,
-            "SOURCE_GRANULE_IDS": f"{SAFE_ID},{TWIN_SAFE_ID}",
+            "GRANULE_LIST": f"{SAFE_ID},{TWIN_SAFE_ID}",
             "OUTPUT_GRANULE_ID": GRANULE_ID_STR,
             "ATTEMPT": "1",
         }

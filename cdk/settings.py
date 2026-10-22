@@ -90,6 +90,9 @@ class StackSettings(BaseSettings):
     # Output bucket for processed products
     OUTPUT_BUCKET_NAME: str
 
+    # Output bucket for GIBS browse imagery
+    GIBS_OUTPUT_BUCKET_NAME: str
+
     # Debug bucket (optional, but useful for avoiding triggering LPDAAC ingest)
     DEBUG_BUCKET_NAME: str | None = None
 

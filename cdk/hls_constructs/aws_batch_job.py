@@ -13,6 +13,11 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+from .aws_batch_infra import SCRATCH_HOST_PATH
+
+#: Container directory backed by the host's NVMe scratch storage
+SCRATCH_CONTAINER_PATH = "/var/scratch"
+
 
 def _parse_ecr_uri(uri: str) -> tuple[str, str] | None:
     """Parse a private ECR URI into (repo_arn, tag).
@@ -122,6 +127,14 @@ class BatchJob(Construct):
                     stream_prefix="job",
                     log_group=self.log_group,
                 ),
+                volumes=[
+                    batch.EcsVolume.host(
+                        name="scratch",
+                        host_path=SCRATCH_HOST_PATH,
+                        container_path=SCRATCH_CONTAINER_PATH,
+                        readonly=False,
+                    )
+                ],
                 secrets=secrets,
                 environment={
                     "METRIC_LOG_GROUP_NAME": metrics_log_group.log_group_name,

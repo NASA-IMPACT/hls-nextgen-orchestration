@@ -243,6 +243,7 @@ class HlsStack(Stack):
             memory_mb=settings.SENTINEL_JOB_MEMORY_MB,
             retry_attempts=settings.PROCESSING_JOB_RETRY_ATTEMPTS,
             metrics_log_group=self.metrics_log_group,
+            command=["export && sentinel.sh"],
             environment={},
             secrets={},
             stage=settings.STAGE,

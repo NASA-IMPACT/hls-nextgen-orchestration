@@ -63,6 +63,7 @@ class BatchJob(Construct):
         memory_mb: int,
         retry_attempts: int,
         metrics_log_group: logs.ILogGroup,
+        command: None | list[str] = None,
         environment: None | dict[str, str] = None,
         secrets: None | dict[str, batch.Secret] = None,
         stage: Literal["dev", "prod"],
@@ -127,6 +128,7 @@ class BatchJob(Construct):
                     stream_prefix="job",
                     log_group=self.log_group,
                 ),
+                command=command,
                 volumes=[
                     batch.EcsVolume.host(
                         name="scratch",

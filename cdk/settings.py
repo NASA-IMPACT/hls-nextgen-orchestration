@@ -90,6 +90,11 @@ class StackSettings(BaseSettings):
     # Output bucket for processed products
     OUTPUT_BUCKET_NAME: str
 
+    # Versioned bucket holding LaSRC ancillary data under LASRC_AUX_PREFIX, mounted
+    # into processing jobs with S3 Files
+    LASRC_AUX_BUCKET_NAME: str
+    LASRC_AUX_PREFIX: str = "lasrc_aux/"
+
     # Output bucket for GIBS browse imagery
     GIBS_OUTPUT_BUCKET_NAME: str
 

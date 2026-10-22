@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from aws_cdk import (
     Aws,
@@ -14,6 +14,7 @@ from aws_cdk import (
 from constructs import Construct
 
 from .aws_batch_infra import SCRATCH_HOST_PATH
+from .s3_file_system import S3FileSystem
 
 #: Container directory backed by the host's NVMe scratch storage
 SCRATCH_CONTAINER_PATH = "/var/scratch"
@@ -66,6 +67,7 @@ class BatchJob(Construct):
         command: None | list[str] = None,
         environment: None | dict[str, str] = None,
         secrets: None | dict[str, batch.Secret] = None,
+        file_system_mounts: None | dict[str, S3FileSystem] = None,
         stage: Literal["dev", "prod"],
         **kwargs: Any,
     ) -> None:
@@ -163,6 +165,15 @@ class BatchJob(Construct):
             propagate_tags=True,
         )
 
+        for i, (container_path, file_system) in enumerate(
+            (file_system_mounts or {}).items()
+        ):
+            self._add_read_only_mount(
+                file_system,
+                container_path,
+                index=len(self.job_def.container.volumes) + i,
+            )
+
         # It's useful to have the ARN of the job definition _without_ the revision
         # so submitted jobs use the "latest" active job
         self.job_def_arn_without_revision = ":".join(
@@ -175,3 +186,32 @@ class BatchJob(Construct):
                 f"job-definition/{self.job_def.job_definition_name}",
             ]
         )
+
+    def _add_read_only_mount(
+        self, file_system: S3FileSystem, container_path: str, *, index: int
+    ) -> None:
+        """Mount an S3 Files file system read-only in the job container
+
+        The L2 EcsVolume does not support S3 Files volumes yet, so this appends
+        to the volumes and mount points it renders at ``index``.
+        """
+        name = f"s3files{index}"
+        cfn_job_def = cast(batch.CfnJobDefinition, self.job_def.node.default_child)
+        cfn_job_def.add_property_override(
+            f"ContainerProperties.Volumes.{index}",
+            {
+                "Name": name,
+                "S3FilesVolumeConfiguration": {
+                    "FileSystemArn": file_system.file_system_arn
+                },
+            },
+        )
+        cfn_job_def.add_property_override(
+            f"ContainerProperties.MountPoints.{index}",
+            {
+                "SourceVolume": name,
+                "ContainerPath": container_path,
+                "ReadOnly": True,
+            },
+        )
+        file_system.grant_read_mount(self.role)

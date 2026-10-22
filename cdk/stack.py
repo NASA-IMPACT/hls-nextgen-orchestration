@@ -40,7 +40,13 @@ from common.jobs import (
     phase0_job_type_config,
     sentinel_job_type_config,
 )
-from hls_constructs import BatchInfra, BatchJob, QueueWithDlq, create_granule_twin_view
+from hls_constructs import (
+    BatchInfra,
+    BatchJob,
+    QueueWithDlq,
+    S3FileSystem,
+    create_granule_twin_view,
+)
 from hls_constructs.lambda_bundling import export_requirements
 from settings import StackSettings
 
@@ -60,6 +66,10 @@ LAMBDA_EXCLUDE = [
     "tests",
     "scripts",
 ]
+
+
+#: Container directory where LaSRC ancillary data is mounted
+LASRC_AUX_DIR = "/var/lasrc_aux"
 
 
 class HlsStack(Stack):
@@ -123,6 +133,13 @@ class HlsStack(Stack):
             "GibsOutputBucket",
             settings.GIBS_OUTPUT_BUCKET_NAME,
             delete=delete_bucket,
+        )
+
+        self.lasrc_aux_bucket = self._make_bucket(
+            "LasrcAuxBucket",
+            settings.LASRC_AUX_BUCKET_NAME,
+            delete=delete_bucket,
+            versioned=True,
         )
 
         self.debug_bucket: s3.IBucket | None
@@ -237,6 +254,16 @@ class HlsStack(Stack):
             stage=settings.STAGE,
         )
 
+        self.lasrc_aux_file_system = S3FileSystem(
+            self,
+            "LasrcAuxFileSystem",
+            bucket=self.lasrc_aux_bucket,
+            prefix=settings.LASRC_AUX_PREFIX,
+            vpc=self.vpc,
+            subnets=self.batch_infra.subnets,
+            clients=[self.batch_infra.compute_environment],
+        )
+
         # ----------------------------------------------------------------------
         # HLS processing compute jobs
         # ----------------------------------------------------------------------
@@ -245,6 +272,7 @@ class HlsStack(Stack):
             "OUTPUT_BUCKET": self.output_bucket.bucket_name,
             "GIBS_OUTPUT_BUCKET": self.gibs_output_bucket.bucket_name,
             "VIIRS_AUX_STARTING_DATE": settings.VIIRS_AUX_STARTING_DATE,
+            "LASRC_AUX_DIR": LASRC_AUX_DIR,
         }
         if self.debug_bucket is not None:
             sentinel_environment["DEBUG_BUCKET"] = self.debug_bucket.bucket_name
@@ -261,6 +289,7 @@ class HlsStack(Stack):
             command=["export && sentinel.sh"],
             environment=sentinel_environment,
             secrets={},
+            file_system_mounts={LASRC_AUX_DIR: self.lasrc_aux_file_system},
             stage=settings.STAGE,
         )
 
@@ -544,6 +573,7 @@ class HlsStack(Stack):
         bucket_name: str,
         *,
         delete: bool,
+        versioned: bool = False,
     ) -> s3.Bucket:
         """Create a stack-managed S3 bucket with standard settings.
 
@@ -556,6 +586,7 @@ class HlsStack(Stack):
             bucket_name=bucket_name,
             enforce_ssl=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
+            versioned=versioned,
             lifecycle_rules=[
                 s3.LifecycleRule(expired_object_delete_marker=True),
                 s3.LifecycleRule(

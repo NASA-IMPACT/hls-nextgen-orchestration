@@ -80,6 +80,10 @@ class BatchInfra(Construct):
         command_user_data.add_commands(
             # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/pull-behavior.html
             'echo "ECS_IMAGE_PULL_BEHAVIOR=prefer-cached" >> /etc/ecs/ecs.config',
+            # S3 Files volumes need ECS agent >= 1.104.0 and amazon-efs-utils >= 3.0,
+            # which the AMI may predate. ECS starts after user data runs, so the
+            # upgraded agent is the one that registers with the cluster.
+            "dnf upgrade -y ecs-init amazon-efs-utils",
         )
         multipart_user_data.add_part(
             ec2.MultipartBody.from_user_data(command_user_data)
@@ -120,6 +124,7 @@ class BatchInfra(Construct):
             ],
         )
 
+        self.subnets = vpc.select_subnets(subnet_type=ec2.SubnetType.PUBLIC).subnets
         self.compute_environment = batch.ManagedEc2EcsComputeEnvironment(
             self,
             f"CE-{stage.capitalize()}",
@@ -131,9 +136,7 @@ class BatchInfra(Construct):
             spot=True,
             minv_cpus=0,
             maxv_cpus=max_vcpu,
-            vpc_subnets=ec2.SubnetSelection(
-                subnet_type=ec2.SubnetType.PUBLIC,
-            ),
+            vpc_subnets=ec2.SubnetSelection(subnets=self.subnets),
             vpc=vpc,
             terminate_on_update=False,
             service_role=compute_environment_service_role,

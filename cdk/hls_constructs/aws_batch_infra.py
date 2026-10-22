@@ -80,9 +80,10 @@ class BatchInfra(Construct):
             # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/pull-behavior.html
             'echo "ECS_IMAGE_PULL_BEHAVIOR=prefer-cached" >> /etc/ecs/ecs.config',
             # S3 Files volumes need ECS agent >= 1.104.0 and amazon-efs-utils >= 3.0,
-            # which the AMI may predate. ECS starts after user data runs, so the
-            # upgraded agent is the one that registers with the cluster.
-            "dnf upgrade -y ecs-init amazon-efs-utils",
+            # which the AMI may predate. AL2023 locks repos to the AMI's release,
+            # so upgrade from the latest release. ECS starts after user data runs,
+            # so the upgraded agent is the one that registers with the cluster.
+            "dnf upgrade -y --releasever=latest ecs-init amazon-efs-utils",
         )
         multipart_user_data.add_part(
             ec2.MultipartBody.from_user_data(command_user_data)

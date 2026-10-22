@@ -98,6 +98,8 @@ class StackSettings(BaseSettings):
 
     # ----- HLS processing
     SENTINEL_CONTAINER_ECR_URI: str
+    # First date (YYYYMMDD) LaSRC uses VIIRS rather than MODIS ancillary data
+    VIIRS_AUX_STARTING_DATE: str = "20210101"
     # Job vCPU and memory limits
     SENTINEL_JOB_VCPU: int = 2
     SENTINEL_JOB_MEMORY_MB: int = 20_000

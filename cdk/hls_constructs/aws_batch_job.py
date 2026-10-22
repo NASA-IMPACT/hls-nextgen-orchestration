@@ -140,6 +140,9 @@ class BatchJob(Construct):
                 secrets=secrets,
                 environment={
                     "METRIC_LOG_GROUP_NAME": metrics_log_group.log_group_name,
+                    "AWS_DEFAULT_REGION": Aws.REGION,
+                    "OMP_NUM_THREADS": str(vcpu),
+                    "RAYON_NUM_THREADS": str(vcpu),
                     **(environment or {}),
                 },
             ),

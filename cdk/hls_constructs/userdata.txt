@@ -1,0 +1,26 @@
+#cloud-config
+packages:
+- mdadm
+
+runcmd:
+- ephemeral_disks=$(realpath -P /dev/disk/by-id/nvme*Instance_Storage* | uniq)
+- ephemeral_disks_count=$(echo "$ephemeral_disks" | wc -w)
+- scratch_fs=ext4
+- scratch_directory={scratch_directory}
+- if [[ "$ephemeral_disks_count" -eq "1" ]]; then
+- mkfs -t "$scratch_fs" "$ephemeral_disks"
+- mkdir -p "$scratch_directory"
+- mount -t "$scratch_fs" "$ephemeral_disks" "$scratch_directory"
+- fi
+- if [[ "$ephemeral_disks_count" -gt "1" ]]; then
+- mdadm_device=/dev/md0
+- mdadm --create "$mdadm_device" --level 0 --raid-devices "$ephemeral_disks_count" $ephemeral_disks
+- mkfs -t "$scratch_fs" "$mdadm_device"
+- mkdir -p "$scratch_directory"
+- mount -t "$scratch_fs" "$mdadm_device" "$scratch_directory"
+- fi
+- dd if=/dev/zero of=$scratch_directory/swapfile bs=128M count=128
+- chmod 600 $scratch_directory/swapfile
+- mkswap $scratch_directory/swapfile
+- swapon $scratch_directory/swapfile
+- echo "$scratch_directory/swapfile swap swap defaults 0 0" >> /etc/fstab

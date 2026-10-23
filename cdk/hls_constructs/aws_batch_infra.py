@@ -14,8 +14,6 @@ from constructs import Construct
 SCRATCH_HOST_PATH = "/scratch"
 #: Host directory where the auxiliary data bucket prefix is mounted with Mountpoint
 AUX_DATA_HOST_PATH = "/mnt/aux_data"
-#: https://github.com/awslabs/mountpoint-s3/releases
-MOUNTPOINT_S3_VERSION = "1.24.0"
 
 #: Instance user data, run before ECS starts on the instance. Formatted in BatchInfra.
 #: ECS_IMAGE_PULL_BEHAVIOR:
@@ -49,7 +47,7 @@ echo "{scratch_dir}/swapfile swap swap defaults 0 0" >> /etc/fstab
 
 # Mount the aux data read-only at {aux_mount_dir}, caching on scratch. ECS
 # starts after user data, so the mount exists before any job.
-dnf install -y {mountpoint_rpm}
+dnf install -y mount-s3
 mkdir -p {aux_mount_dir} {mountpoint_cache}
 mount-s3 {aux_bucket} {aux_mount_dir} \\
   --prefix {aux_prefix} \\
@@ -123,11 +121,6 @@ class BatchInfra(Construct):
         command_user_data.add_commands(
             USER_DATA_TEMPLATE.format(
                 scratch_dir=SCRATCH_HOST_PATH,
-                mountpoint_rpm=(
-                    "https://s3.amazonaws.com/mountpoint-s3-release/"
-                    f"{MOUNTPOINT_S3_VERSION}/x86_64/"
-                    f"mount-s3-{MOUNTPOINT_S3_VERSION}-x86_64.rpm"
-                ),
                 mountpoint_cache=f"{SCRATCH_HOST_PATH}/mountpoint-cache",
                 aux_mount_dir=AUX_DATA_HOST_PATH,
                 aux_bucket=aux_data_bucket.bucket_name,

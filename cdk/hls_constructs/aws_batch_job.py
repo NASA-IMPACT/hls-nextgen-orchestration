@@ -66,6 +66,7 @@ class BatchJob(Construct):
         command: None | list[str] = None,
         environment: None | dict[str, str] = None,
         secrets: None | dict[str, batch.Secret] = None,
+        volumes: None | list[batch.EcsVolume] = None,
         stage: Literal["dev", "prod"],
         **kwargs: Any,
     ) -> None:
@@ -135,7 +136,8 @@ class BatchJob(Construct):
                         host_path=SCRATCH_HOST_PATH,
                         container_path=SCRATCH_CONTAINER_PATH,
                         readonly=False,
-                    )
+                    ),
+                    *(volumes or []),
                 ],
                 secrets=secrets,
                 environment={

@@ -6,6 +6,7 @@ from aws_cdk import (
     Duration,
     RemovalPolicy,
     Stack,
+    aws_batch as batch,
     aws_ec2 as ec2,
     aws_glue as glue,
     aws_iam as iam,
@@ -41,6 +42,7 @@ from common.jobs import (
     sentinel_job_type_config,
 )
 from hls_constructs import BatchInfra, BatchJob, QueueWithDlq, create_granule_twin_view
+from hls_constructs.aws_batch_infra import AUX_DATA_HOST_PATH
 from hls_constructs.lambda_bundling import export_requirements
 from settings import StackSettings
 
@@ -60,6 +62,12 @@ LAMBDA_EXCLUDE = [
     "tests",
     "scripts",
 ]
+
+
+#: Key prefix of the LaSRC auxiliary data in the aux data bucket
+LASRC_AUX_PREFIX = "lasrc_aux/"
+#: Container directory where LaSRC auxiliary data is mounted
+LASRC_AUX_DIR = "/var/lasrc_aux"
 
 
 class HlsStack(Stack):
@@ -233,6 +241,8 @@ class HlsStack(Stack):
             instance_classes=settings.BATCH_INSTANCE_CLASSES,
             max_vcpu=settings.BATCH_MAX_VCPU,
             ami_id=settings.MCP_AMI_ID,
+            aux_data_bucket=self.aux_data_bucket,
+            aux_data_prefix=LASRC_AUX_PREFIX,
             base_name=settings.BATCH_BASE_NAME,
             stage=settings.STAGE,
         )
@@ -245,6 +255,7 @@ class HlsStack(Stack):
             "OUTPUT_BUCKET": self.output_bucket.bucket_name,
             "GIBS_OUTPUT_BUCKET": self.gibs_output_bucket.bucket_name,
             "VIIRS_AUX_STARTING_DATE": settings.VIIRS_AUX_STARTING_DATE,
+            "LASRC_AUX_DIR": LASRC_AUX_DIR,
         }
         if self.debug_bucket is not None:
             sentinel_environment["DEBUG_BUCKET"] = self.debug_bucket.bucket_name
@@ -261,6 +272,14 @@ class HlsStack(Stack):
             command=["export && sentinel.sh"],
             environment=sentinel_environment,
             secrets={},
+            volumes=[
+                batch.EcsVolume.host(
+                    name="lasrc-aux",
+                    host_path=AUX_DATA_HOST_PATH,
+                    container_path=LASRC_AUX_DIR,
+                    readonly=True,
+                )
+            ],
             stage=settings.STAGE,
         )
 

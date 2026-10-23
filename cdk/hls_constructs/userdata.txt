@@ -24,3 +24,6 @@ runcmd:
 - mkswap $scratch_directory/swapfile
 - swapon $scratch_directory/swapfile
 - echo "$scratch_directory/swapfile swap swap defaults 0 0" >> /etc/fstab
+- dnf install -y https://s3.amazonaws.com/mountpoint-s3-release/{mountpoint_version}/x86_64/mount-s3-{mountpoint_version}-x86_64.rpm
+- mkdir -p {aux_mount_directory} "$scratch_directory/mountpoint-cache"
+- mount-s3 {aux_bucket} {aux_mount_directory} --prefix {aux_prefix} --read-only --allow-other --cache "$scratch_directory/mountpoint-cache" --max-cache-size {aux_cache_max_mib}

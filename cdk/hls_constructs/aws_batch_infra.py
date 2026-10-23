@@ -6,6 +6,7 @@ from aws_cdk import (
     aws_batch as batch,
     aws_ec2 as ec2,
     aws_iam as iam,
+    aws_s3 as s3,
     custom_resources as cr,
 )
 from constructs import Construct
@@ -13,6 +14,10 @@ from constructs import Construct
 USERDATA_CLOUD_CONFIG = Path(__file__).parent / "userdata.txt"
 #: Host directory where NVMe instance store volume(s) are mounted
 SCRATCH_HOST_PATH = "/scratch"
+#: Host directory where the auxiliary data bucket prefix is mounted with Mountpoint
+AUX_DATA_HOST_PATH = "/mnt/aux_data"
+#: https://github.com/awslabs/mountpoint-s3/releases
+MOUNTPOINT_S3_VERSION = "1.24.0"
 
 
 class BatchInfra(Construct):
@@ -27,6 +32,9 @@ class BatchInfra(Construct):
         instance_classes: list[str] | None,
         max_vcpu: int,
         ami_id: str,
+        aux_data_bucket: s3.IBucket,
+        aux_data_prefix: str,
+        aux_data_cache_max_mib: int = 10_240,
         base_name: str,
         stage: str,
         **kwargs: Any,
@@ -48,6 +56,13 @@ class BatchInfra(Construct):
             AWS Batch Ec2 instance AMI identifier, OR name of SSM parameter that
             references the AMI ID prefixed by `resolve:ssm` (e.g,
             `resolve:ssm:/param-name`).
+        aux_data_bucket:
+            Bucket mounted read-only on each instance at ``AUX_DATA_HOST_PATH``.
+        aux_data_prefix:
+            Key prefix (ending in "/") of ``aux_data_bucket`` to mount.
+        aux_data_cache_max_mib:
+            Maximum size of the Mountpoint cache, which shares the NVMe scratch
+            storage with jobs.
         base_name:
             Base name prefix for AWS resources. The ComputeEnvironment and JobQueue
             will be named ``{base_name}-{stage}``.
@@ -67,12 +82,18 @@ class BatchInfra(Construct):
         # Note: AWS Batch requires a multi-part UserData to be provided as it will
         # add its own sections
         multipart_user_data = ec2.MultipartUserData(parts_separator="==BOUNDARY==")
-        # Format and mount NVMe instance store volume(s) at SCRATCH_HOST_PATH
+        # Format and mount NVMe instance store volume(s) at SCRATCH_HOST_PATH, then
+        # mount the aux data bucket at AUX_DATA_HOST_PATH, caching on scratch
         multipart_user_data.add_part(
             ec2.MultipartBody.from_raw_body(
                 content_type='text/cloud-config; charset="us-ascii"',
                 body=USERDATA_CLOUD_CONFIG.read_text().format(
-                    scratch_directory=SCRATCH_HOST_PATH
+                    scratch_directory=SCRATCH_HOST_PATH,
+                    mountpoint_version=MOUNTPOINT_S3_VERSION,
+                    aux_bucket=aux_data_bucket.bucket_name,
+                    aux_prefix=aux_data_prefix,
+                    aux_mount_directory=AUX_DATA_HOST_PATH,
+                    aux_cache_max_mib=aux_data_cache_max_mib,
                 ),
             )
         )
@@ -152,6 +173,12 @@ class BatchInfra(Construct):
             "ComputeResources.LaunchTemplate.Version",
             launch_template.latest_version_number,
         )
+
+        # Mountpoint on the instance reads the aux data with the instance role
+        instance_role = self.compute_environment.instance_role
+        if instance_role is None:
+            raise ValueError("Compute environment has no instance role")
+        aux_data_bucket.grant_read(instance_role, f"{aux_data_prefix}*")
         # Enable ContainerInsights to help track resource usage
         self.enable_container_insights(self.compute_environment)
 

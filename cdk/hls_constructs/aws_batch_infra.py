@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Any, cast
 
 from aws_cdk import (
@@ -11,13 +10,54 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-USERDATA_CLOUD_CONFIG = Path(__file__).parent / "userdata.txt"
 #: Host directory where NVMe instance store volume(s) are mounted
 SCRATCH_HOST_PATH = "/scratch"
 #: Host directory where the auxiliary data bucket prefix is mounted with Mountpoint
 AUX_DATA_HOST_PATH = "/mnt/aux_data"
 #: https://github.com/awslabs/mountpoint-s3/releases
 MOUNTPOINT_S3_VERSION = "1.24.0"
+
+#: Instance user data, run before ECS starts on the instance. Formatted in BatchInfra.
+#: ECS_IMAGE_PULL_BEHAVIOR:
+#: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/pull-behavior.html
+USER_DATA_TEMPLATE = """\
+echo "ECS_IMAGE_PULL_BEHAVIOR=prefer-cached" >> /etc/ecs/ecs.config
+
+# Format and mount NVMe instance store volume(s) at {scratch_dir},
+# striping them with RAID 0 if there are several
+dnf install -y mdadm
+ephemeral_disks=$(realpath -P /dev/disk/by-id/nvme*Instance_Storage* | uniq)
+ephemeral_disks_count=$(echo "$ephemeral_disks" | wc -w)
+scratch_device=""
+if [[ "$ephemeral_disks_count" -eq "1" ]]; then
+  scratch_device="$ephemeral_disks"
+elif [[ "$ephemeral_disks_count" -gt "1" ]]; then
+  scratch_device=/dev/md0
+  mdadm --create "$scratch_device" --level 0 \\
+    --raid-devices "$ephemeral_disks_count" $ephemeral_disks
+fi
+mkdir -p {scratch_dir}
+if [[ -n "$scratch_device" ]]; then
+  mkfs -t ext4 "$scratch_device"
+  mount -t ext4 "$scratch_device" {scratch_dir}
+fi
+dd if=/dev/zero of={scratch_dir}/swapfile bs=128M count=128
+chmod 600 {scratch_dir}/swapfile
+mkswap {scratch_dir}/swapfile
+swapon {scratch_dir}/swapfile
+echo "{scratch_dir}/swapfile swap swap defaults 0 0" >> /etc/fstab
+
+# Mount the aux data read-only at {aux_mount_dir}, caching on scratch. ECS
+# starts after user data, so the mount exists before any job.
+dnf install -y {mountpoint_rpm}
+mkdir -p {aux_mount_dir} {mountpoint_cache}
+mount-s3 {aux_bucket} {aux_mount_dir} \\
+  --prefix {aux_prefix} \\
+  --read-only \\
+  --allow-other \\
+  --cache {mountpoint_cache} \\
+  --max-cache-size {aux_cache_max_mib}
+"""
 
 
 class BatchInfra(Construct):
@@ -79,29 +119,25 @@ class BatchInfra(Construct):
         else:
             ec2_instance_classes = None
 
+        command_user_data = ec2.UserData.for_linux()
+        command_user_data.add_commands(
+            USER_DATA_TEMPLATE.format(
+                scratch_dir=SCRATCH_HOST_PATH,
+                mountpoint_rpm=(
+                    "https://s3.amazonaws.com/mountpoint-s3-release/"
+                    f"{MOUNTPOINT_S3_VERSION}/x86_64/"
+                    f"mount-s3-{MOUNTPOINT_S3_VERSION}-x86_64.rpm"
+                ),
+                mountpoint_cache=f"{SCRATCH_HOST_PATH}/mountpoint-cache",
+                aux_mount_dir=AUX_DATA_HOST_PATH,
+                aux_bucket=aux_data_bucket.bucket_name,
+                aux_prefix=aux_data_prefix,
+                aux_cache_max_mib=aux_data_cache_max_mib,
+            )
+        )
         # Note: AWS Batch requires a multi-part UserData to be provided as it will
         # add its own sections
         multipart_user_data = ec2.MultipartUserData(parts_separator="==BOUNDARY==")
-        # Format and mount NVMe instance store volume(s) at SCRATCH_HOST_PATH, then
-        # mount the aux data bucket at AUX_DATA_HOST_PATH, caching on scratch
-        multipart_user_data.add_part(
-            ec2.MultipartBody.from_raw_body(
-                content_type='text/cloud-config; charset="us-ascii"',
-                body=USERDATA_CLOUD_CONFIG.read_text().format(
-                    scratch_directory=SCRATCH_HOST_PATH,
-                    mountpoint_version=MOUNTPOINT_S3_VERSION,
-                    aux_bucket=aux_data_bucket.bucket_name,
-                    aux_prefix=aux_data_prefix,
-                    aux_mount_directory=AUX_DATA_HOST_PATH,
-                    aux_cache_max_mib=aux_data_cache_max_mib,
-                ),
-            )
-        )
-        command_user_data = ec2.UserData.for_linux()
-        command_user_data.add_commands(
-            # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/pull-behavior.html
-            'echo "ECS_IMAGE_PULL_BEHAVIOR=prefer-cached" >> /etc/ecs/ecs.config',
-        )
         multipart_user_data.add_part(
             ec2.MultipartBody.from_user_data(command_user_data)
         )

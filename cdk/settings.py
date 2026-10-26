@@ -90,14 +90,19 @@ class StackSettings(BaseSettings):
     # Output bucket for processed products
     OUTPUT_BUCKET_NAME: str
 
+    # Output bucket for GIBS browse imagery
+    GIBS_OUTPUT_BUCKET_NAME: str
+
     # Debug bucket (optional, but useful for avoiding triggering LPDAAC ingest)
     DEBUG_BUCKET_NAME: str | None = None
 
     # ----- HLS processing
     SENTINEL_CONTAINER_ECR_URI: str
+    # First date (YYYYMMDD) LaSRC uses VIIRS rather than MODIS ancillary data
+    VIIRS_AUX_STARTING_DATE: str = "20210101"
     # Job vCPU and memory limits
-    SENTINEL_JOB_VCPU: int = 1
-    SENTINEL_JOB_MEMORY_MB: int = 2_000
+    SENTINEL_JOB_VCPU: int = 2
+    SENTINEL_JOB_MEMORY_MB: int = 20_000
     # Number of internal AWS Batch job retries
     PROCESSING_JOB_RETRY_ATTEMPTS: int = 3
 
@@ -114,11 +119,8 @@ class StackSettings(BaseSettings):
 
     # Cluster instance classes
     BATCH_INSTANCE_CLASSES: list[str] = [
-        "C4",
-        "C5",
-        "C5A",
-        "C6A",
-        "C6I",
+        "R5D",
+        "R6ID",
     ]
 
     # Cluster scaling max

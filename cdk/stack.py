@@ -118,6 +118,12 @@ class HlsStack(Stack):
             settings.SENTINEL_BUCKET_NAME,
             delete=delete_bucket,
         )
+        # FIXME: this bucket already exists, so import it post-MVP
+        self.gibs_output_bucket = self._make_bucket(
+            "GibsOutputBucket",
+            settings.GIBS_OUTPUT_BUCKET_NAME,
+            delete=delete_bucket,
+        )
 
         self.debug_bucket: s3.IBucket | None
         if settings.DEBUG_BUCKET_NAME:
@@ -234,6 +240,15 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # HLS processing compute jobs
         # ----------------------------------------------------------------------
+        sentinel_environment = {
+            "INPUT_BUCKET": self.sentinel_bucket.bucket_name,
+            "OUTPUT_BUCKET": self.output_bucket.bucket_name,
+            "GIBS_OUTPUT_BUCKET": self.gibs_output_bucket.bucket_name,
+            "VIIRS_AUX_STARTING_DATE": settings.VIIRS_AUX_STARTING_DATE,
+        }
+        if self.debug_bucket is not None:
+            sentinel_environment["DEBUG_BUCKET"] = self.debug_bucket.bucket_name
+
         self.sentinel_ac_job = BatchJob(
             self,
             "SentinelJob",
@@ -243,16 +258,18 @@ class HlsStack(Stack):
             memory_mb=settings.SENTINEL_JOB_MEMORY_MB,
             retry_attempts=settings.PROCESSING_JOB_RETRY_ATTEMPTS,
             metrics_log_group=self.metrics_log_group,
-            environment={},
+            command=["export && sentinel.sh"],
+            environment=sentinel_environment,
             secrets={},
             stage=settings.STAGE,
         )
 
         self.output_bucket.grant_read_write(self.sentinel_ac_job.role)
+        self.gibs_output_bucket.grant_read_write(self.sentinel_ac_job.role)
         self.sentinel_bucket.grant_read(self.sentinel_ac_job.role)
         self.aux_data_bucket.grant_read(self.sentinel_ac_job.role)
         if self.debug_bucket is not None:
-            self.debug_bucket.grant_read(self.sentinel_ac_job.role)
+            self.debug_bucket.grant_read_write(self.sentinel_ac_job.role)
 
         # Shared policy for Batch job submission
         self.batch_submit_job_policy = iam.PolicyStatement(

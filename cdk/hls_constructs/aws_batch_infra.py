@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, cast
 
 from aws_cdk import (
@@ -8,6 +9,10 @@ from aws_cdk import (
     custom_resources as cr,
 )
 from constructs import Construct
+
+USERDATA_CLOUD_CONFIG = Path(__file__).parent / "userdata.txt"
+#: Host directory where NVMe instance store volume(s) are mounted
+SCRATCH_HOST_PATH = "/scratch"
 
 
 class BatchInfra(Construct):
@@ -62,6 +67,15 @@ class BatchInfra(Construct):
         # Note: AWS Batch requires a multi-part UserData to be provided as it will
         # add its own sections
         multipart_user_data = ec2.MultipartUserData(parts_separator="==BOUNDARY==")
+        # Format and mount NVMe instance store volume(s) at SCRATCH_HOST_PATH
+        multipart_user_data.add_part(
+            ec2.MultipartBody.from_raw_body(
+                content_type='text/cloud-config; charset="us-ascii"',
+                body=USERDATA_CLOUD_CONFIG.read_text().format(
+                    scratch_directory=SCRATCH_HOST_PATH
+                ),
+            )
+        )
         command_user_data = ec2.UserData.for_linux()
         command_user_data.add_commands(
             # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/pull-behavior.html
@@ -78,10 +92,12 @@ class BatchInfra(Construct):
             )
         else:
             ec2_machine_image = ec2.MachineImage.lookup(name=ami_id)
+
         ecs_machine_image = batch.EcsMachineImage(
             image=ec2_machine_image,
             image_type=batch.EcsMachineImageType.ECS_AL2,
         )
+
         launch_template = ec2.LaunchTemplate(
             self,
             "LaunchTemplate",

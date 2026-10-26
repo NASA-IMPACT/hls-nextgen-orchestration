@@ -66,6 +66,10 @@ LAMBDA_EXCLUDE = [
 
 #: Key prefix of the LaSRC auxiliary data in the aux data bucket
 LASRC_AUX_PREFIX = "lasrc_aux/"
+#: Key prefix and suffix of newly delivered LaSRC auxiliary data that triggers
+#: submission of granules awaiting it
+LASRC_AUX_TRIGGER_PREFIX = f"{LASRC_AUX_PREFIX}LADS/"
+LASRC_AUX_TRIGGER_SUFFIX = ".h5"
 #: Container directory where LaSRC auxiliary data is mounted
 LASRC_AUX_DIR = "/var/lasrc_aux"
 
@@ -429,7 +433,9 @@ class HlsStack(Stack):
         self.aux_data_bucket.add_event_notification(
             s3.EventType.OBJECT_CREATED,
             s3_notifications.SqsDestination(self.ancillary_trigger_queue),
-            s3.NotificationKeyFilter(prefix=LASRC_AUX_PREFIX),
+            s3.NotificationKeyFilter(
+                prefix=LASRC_AUX_TRIGGER_PREFIX, suffix=LASRC_AUX_TRIGGER_SUFFIX
+            ),
         )
 
         # Internal queue: one message per AWAITING granule, consumed by the

@@ -17,7 +17,7 @@ import os
 from typing import Any
 
 import boto3
-from aws_lambda_powertools import Logger, Metrics, Tracer
+from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from common import AwsBatchClient, GranuleId, convert_safe_id_to_hls_id
@@ -31,7 +31,6 @@ from common.jobs import (
 
 logger = Logger()
 tracer = Tracer()
-metrics = Metrics(namespace="hls_granule_init")
 
 
 @tracer.capture_method
@@ -126,6 +125,7 @@ def process_record(sqs_body: str) -> None:
             write_awaiting_ancillary(store, job_group)
             continue
 
+        # FIXME: include this (???) seems like a lot of calls
         if not batch.active_jobs_below_threshold(max_active_jobs):
             logger.info("Too many active jobs; deferring %s", output_granule_id)
             write_awaiting_ancillary(store, job_group)
@@ -147,7 +147,6 @@ def process_record(sqs_body: str) -> None:
 
 @logger.inject_lambda_context
 @tracer.capture_lambda_handler
-@metrics.log_metrics
 def handler(event: dict[str, Any], context: LambdaContext) -> None:
     """Lambda entry point for Sentinel-2 granule arrival events."""
     records = event.get("Records", [])

@@ -15,9 +15,6 @@ from mypy_boto3_sqs import SQSClient
 from common.aws_batch import AwsBatchClient
 from common.models import GranuleId
 
-# Set metrics namespace before any modules are imported
-os.environ["POWERTOOLS_METRICS_NAMESPACE"] = "test-namespace"
-
 # ---------------------------------------------------------------------------
 # Example granule data
 # ---------------------------------------------------------------------------

@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Any, cast
 
 from aws_cdk import (
@@ -6,13 +5,57 @@ from aws_cdk import (
     aws_batch as batch,
     aws_ec2 as ec2,
     aws_iam as iam,
+    aws_s3 as s3,
     custom_resources as cr,
 )
 from constructs import Construct
 
-USERDATA_CLOUD_CONFIG = Path(__file__).parent / "userdata.txt"
 #: Host directory where NVMe instance store volume(s) are mounted
 SCRATCH_HOST_PATH = "/scratch"
+#: Host directory where the auxiliary data bucket prefix is mounted with Mountpoint
+AUX_DATA_HOST_PATH = "/mnt/aux_data"
+
+#: Instance user data, run before ECS starts on the instance. Formatted in BatchInfra.
+#: ECS_IMAGE_PULL_BEHAVIOR:
+#: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/pull-behavior.html
+USER_DATA_TEMPLATE = """\
+echo "ECS_IMAGE_PULL_BEHAVIOR=prefer-cached" >> /etc/ecs/ecs.config
+
+# Format and mount NVMe instance store volume(s) at {scratch_dir},
+# striping them with RAID 0 if there are several
+dnf install -y mdadm
+ephemeral_disks=$(realpath -P /dev/disk/by-id/nvme*Instance_Storage* | uniq)
+ephemeral_disks_count=$(echo "$ephemeral_disks" | wc -w)
+scratch_device=""
+if [[ "$ephemeral_disks_count" -eq "1" ]]; then
+  scratch_device="$ephemeral_disks"
+elif [[ "$ephemeral_disks_count" -gt "1" ]]; then
+  scratch_device=/dev/md0
+  mdadm --create "$scratch_device" --level 0 \\
+    --raid-devices "$ephemeral_disks_count" $ephemeral_disks
+fi
+mkdir -p {scratch_dir}
+if [[ -n "$scratch_device" ]]; then
+  mkfs -t ext4 "$scratch_device"
+  mount -t ext4 "$scratch_device" {scratch_dir}
+fi
+dd if=/dev/zero of={scratch_dir}/swapfile bs=128M count=128
+chmod 600 {scratch_dir}/swapfile
+mkswap {scratch_dir}/swapfile
+swapon {scratch_dir}/swapfile
+echo "{scratch_dir}/swapfile swap swap defaults 0 0" >> /etc/fstab
+
+# Mount the aux data read-only at {aux_mount_dir}, caching on scratch. ECS
+# starts after user data, so the mount exists before any job.
+dnf install -y mount-s3
+mkdir -p {aux_mount_dir} {mountpoint_cache}
+mount-s3 {aux_bucket} {aux_mount_dir} \\
+  --prefix {aux_prefix} \\
+  --read-only \\
+  --allow-other \\
+  --cache {mountpoint_cache} \\
+  --max-cache-size {aux_cache_max_mib}
+"""
 
 
 class BatchInfra(Construct):
@@ -27,6 +70,9 @@ class BatchInfra(Construct):
         instance_classes: list[str] | None,
         max_vcpu: int,
         ami_id: str,
+        aux_data_bucket: s3.IBucket,
+        aux_data_prefix: str,
+        aux_data_cache_max_mib: int = 10_240,
         base_name: str,
         stage: str,
         **kwargs: Any,
@@ -48,6 +94,13 @@ class BatchInfra(Construct):
             AWS Batch Ec2 instance AMI identifier, OR name of SSM parameter that
             references the AMI ID prefixed by `resolve:ssm` (e.g,
             `resolve:ssm:/param-name`).
+        aux_data_bucket:
+            Bucket mounted read-only on each instance at ``AUX_DATA_HOST_PATH``.
+        aux_data_prefix:
+            Key prefix (ending in "/") of ``aux_data_bucket`` to mount.
+        aux_data_cache_max_mib:
+            Maximum size of the Mountpoint cache, which shares the NVMe scratch
+            storage with jobs.
         base_name:
             Base name prefix for AWS resources. The ComputeEnvironment and JobQueue
             will be named ``{base_name}-{stage}``.
@@ -64,23 +117,20 @@ class BatchInfra(Construct):
         else:
             ec2_instance_classes = None
 
+        command_user_data = ec2.UserData.for_linux()
+        command_user_data.add_commands(
+            USER_DATA_TEMPLATE.format(
+                scratch_dir=SCRATCH_HOST_PATH,
+                mountpoint_cache=f"{SCRATCH_HOST_PATH}/mountpoint-cache",
+                aux_mount_dir=AUX_DATA_HOST_PATH,
+                aux_bucket=aux_data_bucket.bucket_name,
+                aux_prefix=aux_data_prefix,
+                aux_cache_max_mib=aux_data_cache_max_mib,
+            )
+        )
         # Note: AWS Batch requires a multi-part UserData to be provided as it will
         # add its own sections
         multipart_user_data = ec2.MultipartUserData(parts_separator="==BOUNDARY==")
-        # Format and mount NVMe instance store volume(s) at SCRATCH_HOST_PATH
-        multipart_user_data.add_part(
-            ec2.MultipartBody.from_raw_body(
-                content_type='text/cloud-config; charset="us-ascii"',
-                body=USERDATA_CLOUD_CONFIG.read_text().format(
-                    scratch_directory=SCRATCH_HOST_PATH
-                ),
-            )
-        )
-        command_user_data = ec2.UserData.for_linux()
-        command_user_data.add_commands(
-            # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/pull-behavior.html
-            'echo "ECS_IMAGE_PULL_BEHAVIOR=prefer-cached" >> /etc/ecs/ecs.config',
-        )
         multipart_user_data.add_part(
             ec2.MultipartBody.from_user_data(command_user_data)
         )
@@ -152,6 +202,12 @@ class BatchInfra(Construct):
             "ComputeResources.LaunchTemplate.Version",
             launch_template.latest_version_number,
         )
+
+        # Mountpoint on the instance reads the aux data with the instance role
+        instance_role = self.compute_environment.instance_role
+        if instance_role is None:
+            raise ValueError("Compute environment has no instance role")
+        aux_data_bucket.grant_read(instance_role, f"{aux_data_prefix}*")
         # Enable ContainerInsights to help track resource usage
         self.enable_container_insights(self.compute_environment)
 

@@ -96,12 +96,6 @@ class HlsStack(Stack):
         # ----------------------------------------------------------------------
         # Buckets
         # ----------------------------------------------------------------------
-        self.aux_data_bucket = s3.Bucket.from_bucket_name(
-            self,
-            "AuxDataBucket",
-            bucket_name=settings.AUX_DATA_BUCKET_NAME,
-        )
-
         self.processing = ProcessingBucket(
             self,
             "ProcessingBucket",
@@ -116,6 +110,9 @@ class HlsStack(Stack):
         self.processing_bucket = self.processing.bucket
 
         delete_bucket = settings.STAGE == "dev"
+        self.aux_data_bucket = self._make_bucket(
+            "AuxDataBucket", settings.HLS_AUX_BUCKET_NAME, delete=delete_bucket
+        )
         # FIXME: this bucket already exists, so import it post-MVP
         self.output_bucket = self._make_bucket(
             "OutputBucket", settings.OUTPUT_BUCKET_NAME, delete=delete_bucket
@@ -380,7 +377,7 @@ class HlsStack(Stack):
                 "PROCESSING_KEY_PREFIX": self.processing.key_prefix,
                 "SENTINEL_BUCKET_NAME": self.sentinel_bucket.bucket_name,
                 "OUTPUT_BUCKET_NAME": self.output_bucket.bucket_name,
-                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
+                "HLS_AUX_BUCKET_NAME": self.aux_data_bucket.bucket_name,
                 "ANCILLARY_SOURCE": settings.ANCILLARY_SOURCE,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "MAX_ACTIVE_JOBS": str(settings.MAX_ACTIVE_JOBS),
@@ -418,8 +415,6 @@ class HlsStack(Stack):
 
         # ----------------------------------------------------------------------
         # Ancillary-trigger Lambda (ancillary data arrives → fan-out per granule)
-        # NOTE: S3 event notifications on the external aux data bucket must be
-        # configured separately (the bucket is not managed by this stack).
         # ----------------------------------------------------------------------
         self.ancillary_trigger_queue = sqs.Queue(
             self,
@@ -429,6 +424,12 @@ class HlsStack(Stack):
             visibility_timeout=Duration.minutes(2),
             enforce_ssl=True,
             encryption=sqs.QueueEncryption.SQS_MANAGED,
+        )
+
+        self.aux_data_bucket.add_event_notification(
+            s3.EventType.OBJECT_CREATED,
+            s3_notifications.SqsDestination(self.ancillary_trigger_queue),
+            s3.NotificationKeyFilter(prefix=LASRC_AUX_PREFIX),
         )
 
         # Internal queue: one message per AWAITING granule, consumed by the
@@ -456,7 +457,7 @@ class HlsStack(Stack):
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "PROCESSING_KEY_PREFIX": self.processing.key_prefix,
                 "ANCILLARY_SUBMIT_QUEUE_URL": self.ancillary_submit.queue.queue_url,
-                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
+                "HLS_AUX_BUCKET_NAME": self.aux_data_bucket.bucket_name,
                 "ANCILLARY_SOURCE": settings.ANCILLARY_SOURCE,
             },
             layers=[self.powertools_layer],
@@ -494,7 +495,7 @@ class HlsStack(Stack):
             environment={
                 "PROCESSING_BUCKET_NAME": self.processing_bucket.bucket_name,
                 "PROCESSING_KEY_PREFIX": self.processing.key_prefix,
-                "AUX_DATA_BUCKET_NAME": self.aux_data_bucket.bucket_name,
+                "HLS_AUX_BUCKET_NAME": self.aux_data_bucket.bucket_name,
                 "ANCILLARY_SOURCE": settings.ANCILLARY_SOURCE,
                 "BATCH_QUEUE_NAME": self.batch_infra.queue.job_queue_name,
                 "SENTINEL_JOB_DEFINITION_NAME": (

@@ -44,11 +44,11 @@ class TestLaadsSource:
 class TestAncillarySourceFromEnv:
     def test_defaults_to_laads(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ANCILLARY_SOURCE", raising=False)
-        monkeypatch.setenv("AUX_DATA_BUCKET_NAME", "aux")
+        monkeypatch.setenv("HLS_AUX_BUCKET_NAME", "aux")
         assert ancillary_source_from_env() == LaadsSource("aux")
 
     def test_rejects_an_unknown_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANCILLARY_SOURCE", "bogus")
-        monkeypatch.setenv("AUX_DATA_BUCKET_NAME", "aux")
+        monkeypatch.setenv("HLS_AUX_BUCKET_NAME", "aux")
         with pytest.raises(ValueError, match="bogus"):
             ancillary_source_from_env()

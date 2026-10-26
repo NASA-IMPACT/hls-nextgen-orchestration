@@ -82,7 +82,8 @@ class StackSettings(BaseSettings):
 
     SENTINEL_BUCKET_NAME: str
 
-    AUX_DATA_BUCKET_NAME: str
+    # Auxiliary data bucket (LaSRC, Fmask) created and managed by this stack
+    HLS_AUX_BUCKET_NAME: str
     # Where LaSRC's ancillary data comes from (see common.ancillary); the
     # aux data bucket must hold that source's data
     ANCILLARY_SOURCE: str = "laads"

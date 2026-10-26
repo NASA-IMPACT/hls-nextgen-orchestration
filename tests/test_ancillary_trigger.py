@@ -17,7 +17,7 @@ _AUX_KEY = "lasrc_aux/LADS/2023/VJ104ANC.A2023229"
 
 @pytest.fixture(autouse=True)
 def aux_bucket_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AUX_DATA_BUCKET_NAME", "test-aux")
+    monkeypatch.setenv("HLS_AUX_BUCKET_NAME", "test-aux")
 
 
 @pytest.fixture

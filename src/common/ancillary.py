@@ -80,13 +80,14 @@ ANCILLARY_SOURCE selects them with."""
 def ancillary_source_from_env() -> AncillarySource:
     """The ancillary source the Lambda environment selects.
 
-    Reads ANCILLARY_SOURCE (default "laads") and AUX_DATA_BUCKET_NAME.
+    Reads ANCILLARY_SOURCE (default "laads") and HLS_AUX_BUCKET_NAME.
     """
     name = os.environ.get("ANCILLARY_SOURCE", "laads")
     try:
         source = ANCILLARY_SOURCES[name]
     except KeyError:
         raise ValueError(
-            f"Unknown ANCILLARY_SOURCE {name!r}; choose from {sorted(ANCILLARY_SOURCES)}"
+            f"Unknown ANCILLARY_SOURCE {name!r}; "
+            f"choose from {sorted(ANCILLARY_SOURCES)}"
         ) from None
-    return source(os.environ["AUX_DATA_BUCKET_NAME"])
+    return source(os.environ["HLS_AUX_BUCKET_NAME"])

@@ -127,7 +127,7 @@ def aux_bucket(
         Key=f"lasrc_aux/LADS/{year}/VJ104ANC.A{ydoy}",
         Body=b"",
     )
-    monkeypatch.setenv("AUX_DATA_BUCKET_NAME", "test-aux")
+    monkeypatch.setenv("HLS_AUX_BUCKET_NAME", "test-aux")
     return "test-aux"
 
 

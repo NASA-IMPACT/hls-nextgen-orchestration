@@ -15,9 +15,6 @@ from mypy_boto3_sqs import SQSClient
 from common.aws_batch import AwsBatchClient
 from common.models import GranuleId
 
-# Set metrics namespace before any modules are imported
-os.environ["POWERTOOLS_METRICS_NAMESPACE"] = "test-namespace"
-
 # ---------------------------------------------------------------------------
 # Example granule data
 # ---------------------------------------------------------------------------
@@ -127,7 +124,7 @@ def aux_bucket(
         Key=f"lasrc_aux/LADS/{year}/VJ104ANC.A{ydoy}",
         Body=b"",
     )
-    monkeypatch.setenv("AUX_DATA_BUCKET_NAME", "test-aux")
+    monkeypatch.setenv("HLS_AUX_BUCKET_NAME", "test-aux")
     return "test-aux"
 
 

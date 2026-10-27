@@ -148,7 +148,7 @@ class TestProcessRecord:
             Bucket=empty_aux,
             CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
         )
-        monkeypatch.setenv("AUX_DATA_BUCKET_NAME", empty_aux)
+        monkeypatch.setenv("HLS_AUX_BUCKET_NAME", empty_aux)
 
         process_record(_make_sqs_body())
 
